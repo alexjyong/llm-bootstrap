@@ -27,7 +27,7 @@ API is at `http://YOUR_VM_IP:8000/v1` with Bearer token auth (built-in, no nginx
 |-------|------|-----------|---------|
 | AWQ (INT4) | ~17GB | 1x L4 — g2-standard-12 | Good |
 | **FP8** (default) | ~27GB | 2x L4 — g2-standard-24 | Near-lossless |
-| BF16 (full) | ~54GB | 1x A100 80GB — a2-highgpu-1g | Baseline |
+| BF16 (full) | ~54GB | 1x A100 80GB — a2-ultragpu-1g | Baseline |
 
 **FP8** is the default — best quality-per-dollar on L4 hardware. Uses `--kv-cache-dtype fp8_e5m2` to halve KV cache memory, which is critical for fitting 64K context on 2x L4.
 
