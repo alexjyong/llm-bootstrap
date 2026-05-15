@@ -36,8 +36,8 @@ Options:
 
 GPU presets:
   l4      2x L4 (48GB) — g2-standard-24
-  a100    1x A100 (80GB) — a2-highgpu-1g
-  a100x2  2x A100 (160GB) — a2-highgpu-2g
+  a100    1x A100 (40GB) — a2-highgpu-1g
+  a100x2  2x A100 (80GB) — a2-highgpu-2g
 
 Examples:
   ./create_gpu_vm.sh                              # 2x L4, loop all zones
@@ -105,10 +105,10 @@ if [ -z "$GPU_PRESET" ]; then
     echo "  1) 2x L4 (48GB) — g2-standard-24 (default)"
     echo "     GGUF quants (Q4-Q8). Good context window, best value."
     echo ""
-    echo "  2) 1x A100 (80GB) — a2-highgpu-1g"
+    echo "  2) 1x A100 (40GB) — a2-highgpu-1g"
     echo "     Fast inference (2TB/s bandwidth). Large context + high quants."
     echo ""
-    echo "  3) 2x A100 (160GB) — a2-highgpu-2g"
+    echo "  3) 2x A100 (80GB) — a2-highgpu-2g"
     echo "     Full precision or very large models. vLLM multi-user serving."
     echo ""
     while true; do
@@ -153,13 +153,13 @@ case "$GPU_PRESET" in
         MACHINE_TYPE="a2-highgpu-1g"
         GPU_TYPE="nvidia-tesla-a100"
         GPU_COUNT=1
-        GPU_LABEL="1x A100 (80GB)"
+        GPU_LABEL="1x A100 (40GB)"
         ;;
     a100x2)
         MACHINE_TYPE="a2-highgpu-2g"
         GPU_TYPE="nvidia-tesla-a100"
         GPU_COUNT=2
-        GPU_LABEL="2x A100 (160GB)"
+        GPU_LABEL="2x A100 (80GB)"
         ;;
     *)
         echo "ERROR: Unknown GPU preset '${GPU_PRESET}'"
