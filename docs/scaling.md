@@ -27,9 +27,9 @@ With `--kv-cache-dtype fp8_e5m2` enabled (halves KV cache memory):
 |-----------|-----------|-------------|-------------|------------|-------------|
 | 1x L4 | 24 GB | 10 GB | ~5 | ~2 | 1 |
 | 2x L4 | 48 GB | 34 GB | ~17 | ~8 | ~4 |
-| 1x A100 80GB | 80 GB | 66 GB | ~33 | ~16 | ~8 |
-| 2x A100 80GB | 160 GB | 146 GB | ~73 | ~36 | ~18 |
-| 4x A100 80GB | 320 GB | 306 GB | ~153 | ~76 | ~38 |
+| 1x A100 40GB | 40 GB | 26 GB | ~13 | ~6 | ~3 |
+| 2x A100 40GB | 80 GB | 66 GB | ~33 | ~16 | ~8 |
+| 4x A100 40GB | 160 GB | 146 GB | ~73 | ~36 | ~18 |
 
 These are theoretical maximums. Real capacity is ~80% of these due to fragmentation, activations, etc.
 
@@ -60,9 +60,9 @@ vllm serve unsloth/Qwen3.6-27B-NVFP4 \
 | Preset | Machine Type | GPUs | Total VRAM | Monthly cost (on-demand) |
 |--------|-------------|------|-----------|------------------------|
 | `l4` | g2-standard-24 | 2x L4 | 48 GB | ~$1,200 |
-| `a100` | a2-highgpu-1g | 1x A100 | 80 GB | ~$3,000 |
-| `a100x2` | a2-highgpu-2g | 2x A100 | 160 GB | ~$6,000 |
-| (new) | a2-highgpu-4g | 4x A100 | 320 GB | ~$12,000 |
+| `a100` | a2-highgpu-1g | 1x A100 | 40 GB | ~$3,000 |
+| `a100x2` | a2-highgpu-2g | 2x A100 | 80 GB | ~$6,000 |
+| (new) | a2-highgpu-4g | 4x A100 | 160 GB | ~$12,000 |
 
 Spot instances are ~70% cheaper (as of May 2026) but can be preempted.
 
