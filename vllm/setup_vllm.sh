@@ -41,14 +41,14 @@ QUANT_DESCS=(
     "Smallest integer quant. Fits on 1x L4 (24GB). Near Q5_K_M quality."
     "NVIDIA 4-bit float. Fits on 1x L4 (24GB). ~99% of BF16 quality. Best for multi-user."
     "Best quality-per-dollar. Fits on 2x L4 (48GB). Nearly lossless."
-    "Full precision. Requires 1x A100 80GB. Baseline quality."
+    "Full precision. Requires 1x A100 80GB (a2-ultragpu-1g). Baseline quality."
 )
 QUANT_VRAM=("~17 GB" "~14 GB" "~27 GB" "~54 GB")
 QUANT_GPU_CONFIGS=(
     "1x L4 (24GB) — g2-standard-12"
     "1x L4 (24GB) — g2-standard-12"
     "2x L4 (48GB) — g2-standard-24"
-    "1x A100 80GB — a2-highgpu-1g"
+    "1x A100 80GB — a2-ultragpu-1g"
 )
 DEFAULT_QUANT_IDX=2  # FP8
 
@@ -98,7 +98,7 @@ Quantization options:
   AWQ    INT4, ~17GB — fits on 1x L4 (24GB)
   NVFP4  NVIDIA FP4, ~14GB — fits on 1x L4 (24GB), best for multi-user
   FP8    8-bit float, ~27GB — fits on 2x L4 (48GB) (default)
-  BF16   Full precision, ~54GB — needs 1x A100 80GB
+  BF16   Full precision, ~54GB — needs 1x A100 80GB (a2-ultragpu-1g)
 
 Examples:
   ./setup_vllm.sh                              # interactive picker
