@@ -83,8 +83,8 @@ Docs: [llama.cpp](docs/llamacpp.md) | [Docker](docs/docker.md) | [vLLM](vllm/)
 | Preset | Machine | GPUs | VRAM | Best for |
 |--------|---------|------|------|----------|
 | `l4` (default) | g2-standard-24 | 2x L4 | 48GB | GGUF quants (Q4–Q8) |
-| `a100` | a2-highgpu-1g | 1x A100 | 80GB | Fast inference, large context |
-| `a100x2` | a2-highgpu-2g | 2x A100 | 160GB | Full precision, multi-user vLLM |
+| `a100` | a2-highgpu-1g | 1x A100 | 40GB | Fast inference, large context |
+| `a100x2` | a2-highgpu-2g | 2x A100 | 80GB | Full precision, multi-user vLLM |
 
 ```bash
 ./create_gpu_vm.sh                         # interactive picker
