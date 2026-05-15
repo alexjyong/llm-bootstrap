@@ -1,0 +1,37 @@
+services:
+  llama-server:
+    image: ghcr.io/alexjyong/llm-bootstrap/llama-server:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${PORT:-8080}:8080"
+    volumes:
+      - ${MODELS_DIR:-./models}:/models
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - LD_LIBRARY_PATH=/usr/local/lib
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      --model /models/${MODEL_FILE:-Qwen3.6-27B-Q6_K.gguf}
+      --host 0.0.0.0
+      --port 8080
+      --ctx-size ${CONTEXT_LENGTH:-262144}
+      --parallel ${PARALLEL:-3}
+      --gpu-layers all
+      --cache-type-k ${CACHE_TYPE_K:-q8_0}
+      --cache-type-v ${CACHE_TYPE_V:-q8_0}
+      ${EXTRA_FLAGS:-}
+      --api-key ${API_KEY}
+      --alias ${MODEL_ALIAS:-qwen3.6-27b}
+      --mmproj /models/${MMPROJ_FILE:-mmproj-Qwen3.6-27B-BF16.gguf}
+      --jinja
+      --chat-template-kwargs '{"enable_thinking":false}'
+      --metrics
+    restart: unless-stopped
