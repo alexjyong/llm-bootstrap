@@ -315,16 +315,20 @@ echo "[2/4] Downloading model..."
 mkdir -p "$WORK_DIR/models"
 
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-pip > /dev/null 2>&1
-pip install --quiet huggingface-hub[cli] 2>/dev/null || pip install --quiet --break-system-packages huggingface-hub[cli] 2>/dev/null
+sudo apt-get install -y -qq python3-pip > /dev/null
+pip3 install --quiet huggingface-hub[cli] 2>/dev/null || pip3 install --quiet --break-system-packages huggingface-hub[cli] || {
+    echo "ERROR: Failed to install huggingface-hub. Try manually:"
+    echo "  pip3 install huggingface-hub[cli]"
+    exit 1
+}
 export PATH="$HOME/.local/bin:$PATH"
 
 HF_CMD="hf"
 if ! command -v hf &>/dev/null; then
     HF_CMD="huggingface-cli"
     if ! command -v huggingface-cli &>/dev/null; then
-        echo "ERROR: Could not install hf CLI. Try manually:"
-        echo "  pip install huggingface-hub[cli]"
+        echo "ERROR: Could not find hf CLI after install. Try manually:"
+        echo "  pip3 install huggingface-hub[cli]"
         exit 1
     fi
 fi
@@ -415,6 +419,98 @@ done
 
 EXTERNAL_IP=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null || echo "(unknown)")
 
+# ===================================================================
+# Generate test script
+# ===================================================================
+cat > "$WORK_DIR/test_api.sh" << 'TESTEOF'
+#!/bin/bash
+
+PORT=PORT_PLACEHOLDER
+API_KEY=$(cat API_KEY_FILE_PLACEHOLDER)
+BASE_URL="http://localhost:$PORT"
+
+echo "Testing llama.cpp Docker Server..."
+echo "========================================="
+echo ""
+
+PASS=0
+FAIL=0
+
+# 1. Health check
+echo "1. Health check..."
+HEALTH=$(curl -s --max-time 10 "$BASE_URL/health")
+if echo "$HEALTH" | grep -qi "ok\|alive\|status"; then
+    echo "  PASS"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: $HEALTH"
+    FAIL=$((FAIL + 1))
+fi
+
+# 2. Chat completion
+echo ""
+echo "2. Chat completion..."
+RESPONSE=$(curl -s --max-time 120 \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $API_KEY" \
+    "$BASE_URL/v1/chat/completions" \
+    -d '{"messages":[{"role":"user","content":"Write a Python function to check if a number is prime. Be concise."}],"max_tokens":200}')
+CONTENT=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['choices'][0]['message']['content'][:100])" 2>/dev/null)
+if [ -n "$CONTENT" ]; then
+    echo "  Response: $CONTENT..."
+    echo "  PASS"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: No valid response"
+    echo "  $RESPONSE" | head -5
+    FAIL=$((FAIL + 1))
+fi
+
+# 3. Auth enforcement
+echo ""
+echo "3. Auth enforcement..."
+NOAUTH=$(curl -s --max-time 10 \
+    -H "Content-Type: application/json" \
+    "$BASE_URL/v1/chat/completions" \
+    -d '{"messages":[{"role":"user","content":"hi"}],"max_tokens":10}')
+if echo "$NOAUTH" | grep -qi "unauthorized\|error\|401"; then
+    echo "  PASS"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Unauthenticated request was not rejected"
+    FAIL=$((FAIL + 1))
+fi
+
+# 4. Streaming
+echo ""
+echo "4. Streaming..."
+STREAM=$(curl -s --max-time 30 \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer $API_KEY" \
+    "$BASE_URL/v1/chat/completions" \
+    -d '{"messages":[{"role":"user","content":"Say hello in one word"}],"max_tokens":20,"stream":true}')
+if echo "$STREAM" | grep -q "data:"; then
+    echo "  PASS"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: No streaming data received"
+    FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "========================================="
+if [ $FAIL -eq 0 ]; then
+    echo "All $PASS tests passed."
+else
+    echo "$PASS passed, $FAIL failed."
+    exit 1
+fi
+TESTEOF
+
+sed -i "s|PORT_PLACEHOLDER|$PORT|g" "$WORK_DIR/test_api.sh"
+sed -i "s|API_KEY_FILE_PLACEHOLDER|$API_KEY_FILE|g" "$WORK_DIR/test_api.sh"
+chmod +x "$WORK_DIR/test_api.sh"
+
 echo ""
 echo "════════════════════════════════════════════"
 echo "  Deployment Complete!"
@@ -428,4 +524,5 @@ echo ""
 echo "  Logs:     cd $WORK_DIR && docker compose logs -f"
 echo "  Stop:     cd $WORK_DIR && sudo docker compose down"
 echo "  Restart:  cd $WORK_DIR && sudo docker compose up -d"
+echo "  Test:     cd $WORK_DIR && ./test_api.sh"
 echo ""

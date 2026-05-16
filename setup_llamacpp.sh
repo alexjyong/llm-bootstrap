@@ -412,8 +412,12 @@ echo ""
 echo "[1/7] Installing system packages..."
 
 sudo apt-get update -qq
-sudo apt-get install -y -qq python3-pip curl openssl cmake build-essential git > /dev/null 2>&1
-pip install --quiet huggingface-hub[cli] 2>/dev/null || pip install --quiet --break-system-packages huggingface-hub[cli] 2>/dev/null
+sudo apt-get install -y -qq python3-pip curl openssl cmake build-essential git > /dev/null
+pip3 install --quiet huggingface-hub[cli] 2>/dev/null || pip3 install --quiet --break-system-packages huggingface-hub[cli] || {
+    echo "ERROR: Failed to install huggingface-hub. Try manually:"
+    echo "  pip3 install huggingface-hub[cli]"
+    exit 1
+}
 export PATH="$HOME/.local/bin:$PATH"
 
 echo "  Done."

@@ -434,7 +434,7 @@ do_deploy() {
     fi
 
     SETUP_LOG="/tmp/deploy-setup.log"
-    WRAPPED_CMD="${GH_TOKEN_EXPORT}$REMOTE_CMD 2>&1 | tee $SETUP_LOG; echo \"EXIT_CODE=\$?\" >> $SETUP_LOG"
+    WRAPPED_CMD="${GH_TOKEN_EXPORT}set -o pipefail; $REMOTE_CMD 2>&1 | tee $SETUP_LOG"
 
     gcloud compute ssh "$VM_NAME" \
         --zone="$VM_ZONE" \
@@ -443,9 +443,7 @@ do_deploy() {
         --ssh-flag="-o ServerAliveCountMax=10" \
         --command="$WRAPPED_CMD" || {
         echo ""
-        echo "SSH disconnected. The setup may still be running on the VM."
-        echo ""
-        echo "To check progress:"
+        echo "SSH disconnected or setup failed. Check the log:"
         echo "  gcloud compute ssh $VM_NAME --zone=$VM_ZONE --project=$PROJECT --command='tail -f $SETUP_LOG'"
         exit 1
     }
@@ -472,6 +470,7 @@ do_deploy() {
     echo "  API:      http://${EXTERNAL_IP}:${DEFAULT_PORT}/v1/"
     echo ""
     echo "  Creds:    ./llm.sh creds $VM_NAME"
+    echo "  Test:     ./llm.sh test $VM_NAME"
     echo "  Stop:     ./llm.sh stop $VM_NAME"
     echo "  Resume:   ./llm.sh resume $VM_NAME"
     echo ""
