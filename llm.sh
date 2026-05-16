@@ -831,6 +831,69 @@ case "$COMMAND" in
 
         [ "$FAIL" -eq 0 ] || exit 1
         ;;
+        
+        
+    info)
+        parse_vm_args "$@"
+        ZONE=$(resolve_zone "$VM_NAME" "$VM_ZONE")
+        IP=$(gcloud compute instances describe "$VM_NAME" \
+            --zone="$ZONE" \
+            --project="$PROJECT" \
+            --format="get(networkInterfaces[0].accessConfigs[0].natIP)" 2>/dev/null)
+
+        if [ -z "$IP" ]; then
+            echo "ERROR: Could not get IP for $VM_NAME"
+            exit 1
+        fi
+
+        CREDS=$(gcloud compute ssh "$VM_NAME" \
+            --zone="$ZONE" \
+            --project="$PROJECT" \
+            --command="
+                KEY=\$(cat ~/qwen-*/.api_key 2>/dev/null || cat ~/llama-docker/.api_key 2>/dev/null || echo '')
+                PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
+                echo \"\$KEY|\$PORT\"
+            " 2>/dev/null)
+        API_KEY=$(echo "$CREDS" | cut -d'|' -f1)
+        PORT=$(echo "$CREDS" | cut -d'|' -f2)
+        BASE="http://$IP:$PORT"
+
+        PROPS=$(curl -s --max-time 10 \
+            -H "Authorization: Bearer $API_KEY" \
+            "$BASE/props" 2>/dev/null)
+
+        if [ -z "$PROPS" ]; then
+            echo "ERROR: Server not responding at $BASE"
+            exit 1
+        fi
+
+        GPU_INFO=$(gcloud compute ssh "$VM_NAME" \
+            --zone="$ZONE" \
+            --project="$PROJECT" \
+            --command="nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free --format=csv,noheader" 2>/dev/null)
+
+        N_CTX=$(echo "$PROPS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["default_generation_settings"]["n_ctx"])' 2>/dev/null)
+        SLOTS=$(echo "$PROPS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["total_slots"])' 2>/dev/null)
+        MODEL=$(echo "$PROPS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_alias"])' 2>/dev/null)
+        MODEL_PATH=$(echo "$PROPS" | python3 -c 'import sys,json; import os; print(os.path.basename(json.load(sys.stdin)["model_path"]))' 2>/dev/null)
+
+        echo ""
+        echo "════════════════════════════════════════════"
+        echo "  Server Info: $VM_NAME"
+        echo "════════════════════════════════════════════"
+        echo ""
+        echo "  Model:        $MODEL ($MODEL_PATH)"
+        echo "  API:          $BASE/v1/"
+        echo "  Context:      $N_CTX tokens ($((N_CTX / 1024))K)"
+        echo "  Slots:        $SLOTS parallel"
+        echo "  Per slot:     $((N_CTX / SLOTS)) tokens ($((N_CTX / SLOTS / 1024))K)"
+        echo ""
+        echo "  GPUs:"
+        while IFS= read -r line; do
+            echo "    $line"
+        done <<< "$GPU_INFO"
+        echo ""
+        ;;
 
     logs)
         parse_vm_args "$@"
