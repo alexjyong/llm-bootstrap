@@ -13,7 +13,7 @@ NC='\033[0m' # No Color
 # Tool calling parser mapping
 declare -A TOOL_CALL_PARSERS
 TOOL_CALL_PARSERS["gpt-oss"]="hermes"     # Harmony format works with hermes
-TOOL_CALL_PARSERS["qwen"]="hermes"        # Use hermes for Qwen (qwen parser has bugs)
+TOOL_CALL_PARSERS["qwen"]="qwen3_coder"
 TOOL_CALL_PARSERS["llama"]="llama3_json"
 TOOL_CALL_PARSERS["mistral"]="mistral"
 TOOL_CALL_PARSERS["deepseek"]="deepseek_v3"
@@ -24,10 +24,10 @@ get_tool_call_parser() {
     # Detect model family from model name
     if [[ "$model_name" == *"gpt-oss"* ]]; then
         echo "hermes"  # Harmony format
-    elif [[ "$model_name" == *"Qwen3.5"* ]] || [[ "$model_name" == *"qwen3.5"* ]]; then
-        echo "qwen3_coder"  # Qwen 3.5 uses qwen3_coder parser
+    elif [[ "$model_name" == *"Qwen3"* ]] || [[ "$model_name" == *"qwen3"* ]]; then
+        echo "qwen3_coder"
     elif [[ "$model_name" == *"Qwen"* ]] || [[ "$model_name" == *"qwen"* ]]; then
-        echo "hermes"  # Older Qwen models use hermes (qwen parser has bugs)
+        echo "qwen3_coder"
     elif [[ "$model_name" == *"Llama"* ]] || [[ "$model_name" == *"llama"* ]]; then
         echo "llama3_json"
     elif [[ "$model_name" == *"Mistral"* ]] || [[ "$model_name" == *"mistral"* ]]; then
@@ -300,11 +300,11 @@ create_vllm_start_script() {
 
     print_info "Creating vLLM server startup script..."
 
-    # Detect reasoning parser for Qwen 3.5 models
+    # Detect reasoning parser for Qwen 3.x models
     local reasoning_parser=""
-    if [[ "$model_name" == *"Qwen3.5"* ]] || [[ "$model_name" == *"qwen3.5"* ]]; then
+    if [[ "$model_name" == *"Qwen3"* ]] || [[ "$model_name" == *"qwen3"* ]]; then
         reasoning_parser="--reasoning-parser qwen3"
-        print_info "Detected Qwen 3.5 model - adding reasoning parser"
+        print_info "Detected Qwen 3.x model - adding reasoning parser"
     fi
 
     # Configure tool calling if enabled
@@ -620,4 +620,328 @@ GPU_MEMORY["v100"]=16384
 get_gpu_memory_estimate() {
     local gpu_type=$1
     echo "${GPU_MEMORY[$gpu_type]:-40960}"  # Default to 40GB if unknown
+}
+
+# ===================================================================
+# Shared setup functions (quant registry, arg parsing, config)
+# ===================================================================
+
+init_quant_registry() {
+    QUANT_NAMES=(
+        "NVFP4 (NVIDIA FP4)"
+        "FP8"
+        "BF16 (full precision)"
+    )
+    QUANT_KEYS=("NVFP4" "FP8" "BF16")
+    QUANT_DESCS=(
+        "NVIDIA 4-bit float. Fits on 1x L4 (24GB). ~99% of BF16 quality. Best for multi-user."
+        "Best quality-per-dollar. Fits on 2x L4 (48GB). Nearly lossless."
+        "Full precision. Requires 1x A100 80GB (a2-ultragpu-1g). Baseline quality."
+    )
+    QUANT_VRAM=("~14 GB" "~27 GB" "~54 GB")
+    QUANT_GPU_CONFIGS=(
+        "1x L4 (24GB) — g2-standard-12"
+        "2x L4 (48GB) — g2-standard-24"
+        "1x A100 80GB — a2-ultragpu-1g"
+    )
+    DEFAULT_QUANT_IDX=1  # FP8
+
+    QUANT_HF_MODELS=(
+        "unsloth/Qwen3.6-27B-NVFP4"
+        "Qwen/Qwen3.6-27B-FP8"
+        "Qwen/Qwen3.6-27B"
+    )
+    QUANT_VLLM_FLAGS=(
+        "--kv-cache-dtype fp8_e5m2"
+        "--kv-cache-dtype fp8_e5m2"
+        ""
+    )
+    QUANT_TENSOR_PARALLEL=(1 2 1)
+    QUANT_MAX_MODEL_LEN=(131072 262144 131072)
+    QUANT_GPU_MEM_UTIL=(0.92 0.95 0.95)
+    QUANT_MIN_VRAM_MB=(24576 49152 81920)
+    QUANT_MIN_GPU_COUNT=(1 2 1)
+    QUANT_MODEL_SIZES=("~14GB" "~27GB" "~54GB")
+}
+
+parse_vllm_args() {
+    AUTO_YES=false
+    START_ONLY=false
+    QUANT_ARG=""
+    ENABLE_TOOL_CALLING=false
+    ENABLE_MTP=false
+    PORT=8000
+    IDENTIFIER=""
+    DEPLOY_MODE="native"
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --yes|-y) AUTO_YES=true; shift ;;
+            --start-only) START_ONLY=true; shift ;;
+            --docker) DEPLOY_MODE="docker"; shift ;;
+            --quant) QUANT_ARG="$(echo "$2" | tr '[:lower:]' '[:upper:]')"; shift 2 ;;
+            --enable-tool-calling|--tool-calling) ENABLE_TOOL_CALLING=true; shift ;;
+            --mtp) ENABLE_MTP=true; shift ;;
+            --identifier) IDENTIFIER="$2"; shift 2 ;;
+            --port) PORT="$2"; shift 2 ;;
+            --help|-h) show_vllm_usage; exit 0 ;;
+            *) echo "Unknown option: $1"; show_vllm_usage; exit 1 ;;
+        esac
+    done
+}
+
+show_vllm_usage() {
+    cat << 'EOF'
+vLLM Setup for Qwen 27B
+
+Usage: ./setup_vllm.sh [options]
+
+Options:
+  --docker                       Use Docker deployment (default: native/systemd)
+  --quant <NVFP4|FP8|BF16>      Quantization level (skip interactive picker)
+  --yes, -y                      Skip all prompts (non-interactive)
+  --start-only                   Restart existing service/container
+  --enable-tool-calling          Enable function/tool calling support
+  --mtp                          Enable Multi-Token Prediction (~2x faster generation)
+  --port <port>                  API port (default: 8000)
+  --identifier <name>            Custom model ID for API requests (default: qwen3.6-27b)
+
+Quantization options:
+  NVFP4  NVIDIA FP4, ~14GB — fits on 1x L4 (24GB), best for multi-user
+  FP8    8-bit float, ~27GB — fits on 2x L4 (48GB) (default)
+  BF16   Full precision, ~54GB — needs 1x A100 80GB
+
+Examples:
+  ./setup_vllm.sh                                  # interactive native setup
+  ./setup_vllm.sh --docker --quant FP8 --yes       # automated Docker setup
+  ./setup_vllm.sh --quant FP8 --mtp --yes          # native with MTP
+  ./setup_vllm.sh --docker --start-only            # restart Docker container
+  ./setup_vllm.sh --start-only                     # restart systemd service
+
+EOF
+}
+
+resolve_quant_selection() {
+    if [ -n "$QUANT_ARG" ]; then
+        QUANT_IDX=-1
+        for i in "${!QUANT_KEYS[@]}"; do
+            if [ "${QUANT_KEYS[$i]}" = "$QUANT_ARG" ]; then
+                QUANT_IDX=$i
+                break
+            fi
+        done
+        if [ "$QUANT_IDX" = "-1" ]; then
+            echo "ERROR: Unknown quantization '$QUANT_ARG'"
+            echo "Available: ${QUANT_KEYS[*]}"
+            exit 1
+        fi
+    elif [ "$AUTO_YES" = "true" ]; then
+        QUANT_IDX=$DEFAULT_QUANT_IDX
+    else
+        echo ""
+        print_header "vLLM Setup — Qwen 27B"
+        echo ""
+        echo "Select quantization level:"
+        echo ""
+        for i in "${!QUANT_NAMES[@]}"; do
+            local default_marker=""
+            if [ "$i" = "$DEFAULT_QUANT_IDX" ]; then
+                default_marker=" (default)"
+            fi
+            echo "  $((i+1))) ${QUANT_NAMES[$i]}  ${QUANT_VRAM[$i]}${default_marker}"
+            echo "     ${QUANT_DESCS[$i]}"
+            echo "     GPU: ${QUANT_GPU_CONFIGS[$i]}"
+            echo ""
+        done
+        while true; do
+            read -p "Quantization [1-${#QUANT_NAMES[@]}] (Enter for default): " choice
+            if [ -z "$choice" ]; then
+                QUANT_IDX=$DEFAULT_QUANT_IDX
+                break
+            fi
+            if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#QUANT_NAMES[@]} ]; then
+                QUANT_IDX=$((choice - 1))
+                break
+            fi
+            echo "  Invalid choice. Enter 1-${#QUANT_NAMES[@]} or press Enter for default."
+        done
+    fi
+}
+
+set_derived_config() {
+    QUANT_KEY="${QUANT_KEYS[$QUANT_IDX]}"
+    HF_MODEL="${QUANT_HF_MODELS[$QUANT_IDX]}"
+    VLLM_FLAGS="${QUANT_VLLM_FLAGS[$QUANT_IDX]}"
+    TENSOR_PARALLEL="${QUANT_TENSOR_PARALLEL[$QUANT_IDX]}"
+    MAX_MODEL_LEN="${QUANT_MAX_MODEL_LEN[$QUANT_IDX]}"
+    GPU_MEM_UTIL="${QUANT_GPU_MEM_UTIL[$QUANT_IDX]}"
+    MIN_VRAM="${QUANT_MIN_VRAM_MB[$QUANT_IDX]}"
+    MIN_GPUS="${QUANT_MIN_GPU_COUNT[$QUANT_IDX]}"
+    MODEL_SIZE="${QUANT_MODEL_SIZES[$QUANT_IDX]}"
+
+    SERVED_NAME="qwen3.6-27b"
+    [ -n "$IDENTIFIER" ] && SERVED_NAME="$IDENTIFIER"
+
+    MODEL_DISPLAY="Qwen3.6-27B ($QUANT_KEY)"
+
+    if [ "$DEPLOY_MODE" = "docker" ]; then
+        WORK_DIR="$HOME/vllm-docker"
+    else
+        WORK_DIR="$HOME/qwen-27b-vllm"
+    fi
+    SERVICE_NAME="vllm-qwen-27b"
+}
+
+prompt_mtp() {
+    if [ "$ENABLE_MTP" = "false" ] && [ "$AUTO_YES" = "false" ]; then
+        echo ""
+        echo "Enable Multi-Token Prediction (MTP)?"
+        echo "  ~2x faster generation using built-in draft prediction heads"
+        echo ""
+        echo "  1) No   (standard inference)"
+        echo "  2) Yes  (speculative decoding with MTP)"
+        echo ""
+        while true; do
+            read -p "MTP [1-2] (Enter for default): " choice
+            if [ -z "$choice" ] || [ "$choice" = "1" ]; then break; fi
+            if [ "$choice" = "2" ]; then ENABLE_MTP=true; break; fi
+            echo "  Invalid choice."
+        done
+    fi
+
+    MTP_FLAGS=""
+    if [ "$ENABLE_MTP" = "true" ]; then
+        MTP_FLAGS="--speculative-config '{\"method\":\"qwen3_next_mtp\",\"num_speculative_tokens\":2}'"
+    fi
+}
+
+assemble_extra_flags() {
+    # FP8 KV cache dtype is incompatible with FP8 checkpoints
+    if [[ "$VLLM_FLAGS" == *"fp8_e5m2"* ]] && [ "$QUANT_KEY" = "FP8" ]; then
+        print_info "Dropping --kv-cache-dtype fp8_e5m2 (incompatible with FP8 checkpoints)"
+        VLLM_FLAGS=""
+    fi
+
+    EXTRA_FLAGS="$VLLM_FLAGS"
+
+    if [ -n "$MTP_FLAGS" ]; then
+        EXTRA_FLAGS="$EXTRA_FLAGS $MTP_FLAGS"
+    fi
+
+    if [ "$ENABLE_TOOL_CALLING" = "true" ]; then
+        local parser
+        parser=$(get_tool_call_parser "$HF_MODEL")
+        EXTRA_FLAGS="$EXTRA_FLAGS --enable-auto-tool-choice --tool-call-parser $parser"
+        print_info "Tool calling enabled with parser: $parser"
+    fi
+
+    # Reasoning parser for Qwen3.x models
+    if [[ "$HF_MODEL" == *"Qwen3"* ]] || [[ "$HF_MODEL" == *"qwen3"* ]]; then
+        EXTRA_FLAGS="$EXTRA_FLAGS --reasoning-parser qwen3"
+    fi
+
+    # Larger batch budget improves throughput for code/agentic workloads
+    if [ "$TENSOR_PARALLEL" -gt 1 ] 2>/dev/null; then
+        EXTRA_FLAGS="$EXTRA_FLAGS --max-num-batched-tokens 8192"
+    fi
+
+    EXTRA_FLAGS="$EXTRA_FLAGS --default-chat-template-kwargs '{\"enable_thinking\":false}'"
+}
+
+confirm_installation() {
+    local mode_label=${1:-""}
+    echo ""
+    print_header "$MODEL_DISPLAY vLLM Setup${mode_label:+ ($mode_label)}"
+    echo ""
+    echo "  Model:          $HF_MODEL"
+    echo "  Quantization:   ${QUANT_NAMES[$QUANT_IDX]}"
+    echo "  Model size:     ${QUANT_VRAM[$QUANT_IDX]}"
+    echo "  GPUs:           ${QUANT_GPU_CONFIGS[$QUANT_IDX]}"
+    echo "  Tensor parallel: $TENSOR_PARALLEL"
+    echo "  Max context:    $MAX_MODEL_LEN tokens"
+    echo "  Port:           $PORT"
+    echo "  Model ID:       $SERVED_NAME"
+    if [ "$ENABLE_MTP" = "true" ]; then
+        echo "  MTP:            ENABLED (num_speculative_tokens: 2)"
+    fi
+    if [ "$ENABLE_TOOL_CALLING" = "true" ]; then
+        echo "  Tool calling:   ENABLED"
+    fi
+    if [ "$DEPLOY_MODE" = "docker" ]; then
+        echo "  Deploy mode:    Docker"
+    else
+        echo "  Deploy mode:    Native (systemd)"
+    fi
+    echo ""
+
+    if [ "$AUTO_YES" = "false" ]; then
+        read -p "Continue with installation? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            echo "Installation cancelled."
+            exit 0
+        fi
+    else
+        echo "Auto-confirmed (--yes flag)"
+    fi
+}
+
+wait_for_healthy() {
+    local port=${1:-8000}
+    local max_retries=${2:-60}
+    local sleep_interval=${3:-10}
+
+    echo ""
+    print_info "Waiting for server to become healthy..."
+    echo "  This can take 5-10 minutes on first start."
+
+    for i in $(seq 1 "$max_retries"); do
+        if curl -s "http://localhost:$port/health" | grep -q "ok\|healthy"; then
+            print_success "Server healthy"
+            return 0
+        fi
+        if [ "$i" = "$max_retries" ]; then
+            print_warning "Server still starting after $((max_retries * sleep_interval))s"
+            return 1
+        fi
+        sleep "$sleep_interval"
+    done
+}
+
+warmup_vllm() {
+    local port=${1:-8000}
+    local served_name=${2:-""}
+    local api_key=${3:-""}
+
+    print_info "Warming up model (triggers Triton JIT compilation)..."
+
+    local auth_header=""
+    if [ -n "$api_key" ]; then
+        auth_header="-H \"Authorization: Bearer $api_key\""
+    fi
+
+    local model_field=""
+    if [ -n "$served_name" ]; then
+        model_field="\"model\": \"$served_name\","
+    else
+        local first_model
+        first_model=$(curl -s $auth_header http://localhost:$port/v1/models 2>/dev/null \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null)
+        if [ -n "$first_model" ]; then
+            model_field="\"model\": \"$first_model\","
+        fi
+    fi
+
+    local warmup_response
+    warmup_response=$(eval curl -s -m 120 \
+        $auth_header \
+        -H '"Content-Type: application/json"' \
+        -d "'{${model_field} \"messages\": [{\"role\": \"user\", \"content\": \"Say OK\"}], \"max_tokens\": 5}'" \
+        "http://localhost:$port/v1/chat/completions" 2>/dev/null)
+
+    if echo "$warmup_response" | python3 -c "import sys,json; r=json.load(sys.stdin); assert r['choices'][0]['finish_reason']" 2>/dev/null; then
+        print_success "Warmup complete — model ready for requests"
+    else
+        print_warning "Warmup request did not complete cleanly. First user request may be slow."
+    fi
 }

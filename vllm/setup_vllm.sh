@@ -1,19 +1,13 @@
 #!/bin/bash
 
-# vLLM setup script for Qwen 27B on Google Cloud GPU VMs.
-# Supports multiple quantization levels with an interactive picker or CLI flags.
-#
-# Sets up:
-#   - vLLM inference server
-#   - Model download from Hugging Face
-#   - Built-in API key auth (no nginx needed)
-#   - systemd service
+# Unified vLLM setup script for Qwen 27B on Google Cloud GPU VMs.
+# Supports native (systemd) and Docker deployment modes.
 #
 # Usage:
-#   ./setup_vllm.sh                          # interactive quant picker
-#   ./setup_vllm.sh --quant FP8              # skip TUI
-#   ./setup_vllm.sh --quant AWQ --yes        # fully non-interactive
-#   ./setup_vllm.sh --start-only             # skip install, just start services
+#   ./setup_vllm.sh                              # interactive native setup
+#   ./setup_vllm.sh --docker --quant FP8 --yes   # automated Docker setup
+#   ./setup_vllm.sh --start-only                 # restart systemd service
+#   ./setup_vllm.sh --docker --start-only        # restart Docker container
 
 set -e
 
@@ -27,127 +21,132 @@ else
     exit 1
 fi
 
-# ===================================================================
-# Quantization registry
-# ===================================================================
-QUANT_NAMES=(
-    "AWQ (INT4)"
-    "NVFP4 (NVIDIA FP4)"
-    "FP8"
-    "BF16 (full precision)"
-)
-QUANT_KEYS=("AWQ" "NVFP4" "FP8" "BF16")
-QUANT_DESCS=(
-    "Smallest integer quant. Fits on 1x L4 (24GB). Near Q5_K_M quality."
-    "NVIDIA 4-bit float. Fits on 1x L4 (24GB). ~99% of BF16 quality. Best for multi-user."
-    "Best quality-per-dollar. Fits on 2x L4 (48GB). Nearly lossless."
-    "Full precision. Requires 1x A100 80GB (a2-ultragpu-1g). Baseline quality."
-)
-QUANT_VRAM=("~17 GB" "~14 GB" "~27 GB" "~54 GB")
-QUANT_GPU_CONFIGS=(
-    "1x L4 (24GB) — g2-standard-12"
-    "1x L4 (24GB) — g2-standard-12"
-    "2x L4 (48GB) — g2-standard-24"
-    "1x A100 80GB — a2-ultragpu-1g"
-)
-DEFAULT_QUANT_IDX=2  # FP8
-
-# Model configs per quantization
-QUANT_HF_MODELS=(
-    "cyankiwi/Qwen3.6-27B-AWQ-INT4"
-    "unsloth/Qwen3.6-27B-NVFP4"
-    "Qwen/Qwen3.6-27B-FP8"
-    "Qwen/Qwen3.6-27B"
-)
-QUANT_VLLM_FLAGS=(
-    "--quantization awq"
-    "--kv-cache-dtype fp8_e5m2"
-    "--kv-cache-dtype fp8_e5m2"
-    ""
-)
-QUANT_TENSOR_PARALLEL=(1 1 2 1)
-QUANT_MAX_MODEL_LEN=(32768 32768 65536 65536)
-QUANT_GPU_MEM_UTIL=(0.92 0.92 0.95 0.95)
-QUANT_MIN_VRAM_MB=(24576 24576 49152 81920)
-QUANT_MIN_GPU_COUNT=(1 1 2 1)
-QUANT_MODEL_SIZES=("~17GB" "~14GB" "~27GB" "~54GB")
+# Docker constants
+VLLM_IMAGE="vllm/vllm-openai"
+VLLM_VERSION="v0.21.0"
 
 # ===================================================================
-# Parse arguments
+# Mode-specific functions: Docker
 # ===================================================================
-AUTO_YES=false
-START_ONLY=false
-QUANT_ARG=""
-ENABLE_TOOL_CALLING=false
-PORT=8000
 
-show_usage() {
-    cat << 'EOF'
-vLLM Setup for Qwen 27B
+do_start_only_docker() {
+    if [ ! -f "$HOME/vllm-docker/.env" ]; then
+        print_error "$HOME/vllm-docker/.env not found. Run full setup first."
+        exit 1
+    fi
+    local work_dir="$HOME/vllm-docker"
+    print_info "Starting Docker container..."
+    cd "$work_dir" && sudo docker compose up -d
+    print_success "Container started"
 
-Usage: ./setup_vllm.sh [options]
+    local port
+    port=$(grep "^PORT=" "$work_dir/.env" 2>/dev/null | cut -d= -f2)
+    port=${port:-8000}
+    wait_for_healthy "$port"
 
-Options:
-  --quant <AWQ|NVFP4|FP8|BF16>  Quantization level (skip interactive picker)
-  --yes, -y                      Skip all prompts (non-interactive)
-  --start-only                   Skip installation, just start existing service
-  --enable-tool-calling          Enable function/tool calling support
-  --port <port>                  API port (default: 8000)
+    local api_key
+    api_key=$(cat "$work_dir/.api_key" 2>/dev/null || echo "")
+    local served_name
+    served_name=$(grep "^SERVED_NAME=" "$work_dir/.env" 2>/dev/null | cut -d= -f2)
+    if [ -n "$served_name" ]; then
+        warmup_vllm "$port" "$served_name" "$api_key"
+    fi
 
-Quantization options:
-  AWQ    INT4, ~17GB — fits on 1x L4 (24GB)
-  NVFP4  NVIDIA FP4, ~14GB — fits on 1x L4 (24GB), best for multi-user
-  FP8    8-bit float, ~27GB — fits on 2x L4 (48GB) (default)
-  BF16   Full precision, ~54GB — needs 1x A100 80GB (a2-ultragpu-1g)
-
-Examples:
-  ./setup_vllm.sh                              # interactive picker
-  ./setup_vllm.sh --quant FP8 --yes            # automated FP8 setup
-  ./setup_vllm.sh --quant NVFP4 --yes          # smallest, multi-user optimized
-  ./setup_vllm.sh --start-only                 # restart after VM reboot
-
-EOF
+    echo ""
+    echo "Check logs: cd $work_dir && docker compose logs -f"
 }
 
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --yes|-y)
-            AUTO_YES=true
-            shift
-            ;;
-        --start-only)
-            START_ONLY=true
-            shift
-            ;;
-        --quant)
-            QUANT_ARG="$2"
-            shift 2
-            ;;
-        --enable-tool-calling|--tool-calling)
-            ENABLE_TOOL_CALLING=true
-            shift
-            ;;
-        --port)
-            PORT="$2"
-            shift 2
-            ;;
-        --help|-h)
-            show_usage
-            exit 0
-            ;;
-        *)
-            echo "Unknown option: $1"
-            show_usage
-            exit 1
-            ;;
-    esac
-done
+install_docker_prereqs() {
+    echo ""
+    echo "[1/4] Checking Docker and GPU..."
+
+    if ! command -v docker &>/dev/null; then
+        echo "  Installing Docker..."
+        curl -fsSL https://get.docker.com | sh
+        sudo usermod -aG docker "$USER"
+        echo "  Docker installed."
+    fi
+
+    if ! sudo docker info 2>/dev/null | grep -q "Runtimes.*nvidia"; then
+        if ! command -v nvidia-container-cli &>/dev/null; then
+            echo "  Installing NVIDIA Container Toolkit..."
+            curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+            curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+                sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+                sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+            sudo apt-get update -qq && sudo apt-get install -y -qq nvidia-container-toolkit > /dev/null 2>&1
+            sudo nvidia-ctk runtime configure --runtime=docker
+            sudo systemctl restart docker
+        fi
+    fi
+
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+    echo "  Docker + GPU ready."
+}
+
+pull_vllm_image() {
+    echo "[2/4] Pulling vLLM image ($VLLM_IMAGE:$VLLM_VERSION)..."
+    sudo docker pull "$VLLM_IMAGE:$VLLM_VERSION" || {
+        print_error "Failed to pull $VLLM_IMAGE:$VLLM_VERSION"
+        exit 1
+    }
+    echo "  Done."
+}
+
+configure_docker_env() {
+    echo "[3/4] Configuring..."
+    mkdir -p "$WORK_DIR"
+
+    API_KEY=$(generate_api_key "$WORK_DIR")
+
+    cat > "$WORK_DIR/.env" << EOF
+API_KEY=$API_KEY
+MODEL=$HF_MODEL
+SERVED_NAME=$SERVED_NAME
+PORT=$PORT
+TENSOR_PARALLEL=$TENSOR_PARALLEL
+MAX_MODEL_LEN=$MAX_MODEL_LEN
+GPU_MEM_UTIL=$GPU_MEM_UTIL
+VLLM_VERSION=$VLLM_VERSION
+HF_CACHE=$HOME/.cache/huggingface
+EXTRA_FLAGS=$EXTRA_FLAGS
+EOF
+
+    cp "$SCRIPT_DIR/docker-compose.yml" "$WORK_DIR/docker-compose.yml"
+    echo "  Configured."
+}
+
+start_docker_container() {
+    echo "[4/4] Starting container..."
+    cd "$WORK_DIR"
+    sudo docker compose down 2>/dev/null || true
+    sudo docker compose up -d
+}
+
+print_docker_completion() {
+    local external_ip
+    external_ip=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null || echo "(unknown)")
+
+    echo ""
+    print_header "Deployment Complete!"
+    echo ""
+    echo "  Model:    $MODEL_DISPLAY"
+    echo "  MTP:      $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+    echo "  API:      http://$external_ip:$PORT/v1/"
+    echo "  API Key:  $API_KEY"
+    echo "  Model ID: $SERVED_NAME"
+    echo ""
+    echo "  Logs:     cd $WORK_DIR && docker compose logs -f"
+    echo "  Stop:     cd $WORK_DIR && sudo docker compose down"
+    echo "  Restart:  ./setup_vllm.sh --docker --start-only"
+    echo ""
+}
 
 # ===================================================================
-# Handle --start-only
+# Mode-specific functions: Native (systemd)
 # ===================================================================
-if [ "$START_ONLY" = "true" ]; then
-    SERVICE_NAME="vllm-qwen-27b"
+
+do_start_only_native() {
     if ! systemctl list-unit-files | grep -q "$SERVICE_NAME.service"; then
         print_error "Service $SERVICE_NAME not found. Run full setup first."
         exit 1
@@ -155,195 +154,137 @@ if [ "$START_ONLY" = "true" ]; then
     print_info "Starting $SERVICE_NAME.service..."
     sudo systemctl start "$SERVICE_NAME.service"
     print_success "Service started"
+
+    wait_for_healthy "$PORT"
+
+    local api_key=""
+    [ -f "$WORK_DIR/.api_key" ] && api_key=$(cat "$WORK_DIR/.api_key")
+    warmup_vllm "$PORT" "$SERVED_NAME" "$api_key"
+
     echo ""
     echo "Check status:  sudo systemctl status $SERVICE_NAME.service"
     echo "View logs:     sudo journalctl -u $SERVICE_NAME.service -f"
+}
+
+install_native() {
+    update_system
+    install_essential_packages
+    verify_nvidia_drivers
+    check_gpu_memory "$MIN_VRAM" "$MIN_GPUS"
+    create_venv "$WORK_DIR"
+
+    source "$WORK_DIR/venv/bin/activate"
+    install_uv
+    install_pytorch
+    install_vllm "true"
+    install_hf_dependencies
+    huggingface_login
+    download_model "$HF_MODEL" "$MODEL_SIZE"
+}
+
+configure_native() {
+    API_KEY=$(generate_api_key "$WORK_DIR")
+
+    create_vllm_start_script \
+        "$WORK_DIR" \
+        "$HF_MODEL" \
+        "$TENSOR_PARALLEL" \
+        "$MAX_MODEL_LEN" \
+        "$GPU_MEM_UTIL" \
+        "$SERVED_NAME" \
+        "$EXTRA_FLAGS" \
+        "$ENABLE_TOOL_CALLING" \
+        "" \
+        "$WORK_DIR/.api_key" \
+        "$PORT"
+
+    create_systemd_service \
+        "$SERVICE_NAME" \
+        "$WORK_DIR" \
+        "$MODEL_DISPLAY vLLM Server"
+
+    configure_firewall "$PORT"
+
+    create_test_script \
+        "$WORK_DIR" \
+        "$SERVED_NAME" \
+        "$MODEL_DISPLAY"
+}
+
+print_native_completion() {
+    echo ""
+    print_header "Installation Complete!"
+    echo ""
+    echo "  Model:     $MODEL_DISPLAY"
+    echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+    echo "  Service:   $SERVICE_NAME"
+    echo "  Directory: $WORK_DIR"
+    echo "  API key:   $WORK_DIR/.api_key"
+    echo ""
+    print_info "Next steps:"
+    echo ""
+    echo "  1. Start the server:"
+    echo "     sudo systemctl start $SERVICE_NAME.service"
+    echo ""
+    echo "  2. Wait for startup (watch for 'Uvicorn running on http://0.0.0.0:$PORT'):"
+    echo "     sudo journalctl -u $SERVICE_NAME.service -f"
+    echo ""
+    echo "  3. Test the API:"
+    echo "     cd $WORK_DIR && python3 test_api.py"
+    echo ""
+    echo "  4. Get your VM's external IP:"
+    echo "     curl -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip"
+    echo ""
+    echo "  5. Get your API key:"
+    echo "     cat $WORK_DIR/.api_key"
+    echo ""
+    print_warning "Configure GCP firewall to allow port $PORT:"
+    echo "     gcloud compute firewall-rules create allow-vllm \\"
+    echo "       --allow=tcp:$PORT \\"
+    echo "       --source-ranges=YOUR_IP/32"
+    echo ""
+    echo "  Restart after VM reboot:"
+    echo "     ./setup_vllm.sh --start-only"
+    echo ""
+    print_success "Setup complete!"
+}
+
+# ===================================================================
+# Main orchestration
+# ===================================================================
+
+init_quant_registry
+parse_vllm_args "$@"
+
+# Handle --start-only early exit
+if [ "$START_ONLY" = "true" ]; then
+    if [ "$DEPLOY_MODE" = "docker" ]; then
+        do_start_only_docker
+    else
+        set_derived_config
+        do_start_only_native
+    fi
     exit 0
 fi
 
-# ===================================================================
-# Resolve quantization selection
-# ===================================================================
-resolve_quant() {
-    local arg="$1"
-    local upper=$(echo "$arg" | tr '[:lower:]' '[:upper:]')
+# Shared config resolution
+resolve_quant_selection
+set_derived_config
+prompt_mtp
+assemble_extra_flags
 
-    for i in "${!QUANT_KEYS[@]}"; do
-        if [ "${QUANT_KEYS[$i]}" = "$upper" ]; then
-            QUANT_IDX=$i
-            return 0
-        fi
-    done
-
-    echo "ERROR: Unknown quantization '$arg'"
-    echo "Available: ${QUANT_KEYS[*]}"
-    exit 1
-}
-
-if [ -n "$QUANT_ARG" ]; then
-    resolve_quant "$QUANT_ARG"
-elif [ "$AUTO_YES" = "true" ]; then
-    QUANT_IDX=$DEFAULT_QUANT_IDX
+if [ "$DEPLOY_MODE" = "docker" ]; then
+    confirm_installation "Docker"
+    install_docker_prereqs
+    pull_vllm_image
+    configure_docker_env
+    start_docker_container
+    wait_for_healthy "$PORT"
+    warmup_vllm "$PORT" "$SERVED_NAME" "$API_KEY"
+    print_docker_completion
 else
-    # Interactive quant picker
-    echo ""
-    print_header "vLLM Setup — Qwen 27B"
-    echo ""
-    echo "Select quantization level:"
-    echo ""
-    for i in "${!QUANT_NAMES[@]}"; do
-        default_marker=""
-        if [ "$i" = "$DEFAULT_QUANT_IDX" ]; then
-            default_marker=" (default)"
-        fi
-        echo "  $((i+1))) ${QUANT_NAMES[$i]}  ${QUANT_VRAM[$i]}${default_marker}"
-        echo "     ${QUANT_DESCS[$i]}"
-        echo "     GPU: ${QUANT_GPU_CONFIGS[$i]}"
-        echo ""
-    done
-    while true; do
-        read -p "Quantization [1-${#QUANT_NAMES[@]}] (Enter for default): " choice
-        if [ -z "$choice" ]; then
-            QUANT_IDX=$DEFAULT_QUANT_IDX
-            break
-        fi
-        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#QUANT_NAMES[@]} ]; then
-            QUANT_IDX=$((choice - 1))
-            break
-        fi
-        echo "  Invalid choice. Enter 1-${#QUANT_NAMES[@]} or press Enter for default."
-    done
+    confirm_installation "Native"
+    install_native
+    configure_native
+    print_native_completion
 fi
-
-# ===================================================================
-# Set derived configuration
-# ===================================================================
-QUANT_KEY="${QUANT_KEYS[$QUANT_IDX]}"
-HF_MODEL="${QUANT_HF_MODELS[$QUANT_IDX]}"
-VLLM_QUANT_FLAGS="${QUANT_VLLM_FLAGS[$QUANT_IDX]}"
-TENSOR_PARALLEL="${QUANT_TENSOR_PARALLEL[$QUANT_IDX]}"
-MAX_MODEL_LEN="${QUANT_MAX_MODEL_LEN[$QUANT_IDX]}"
-GPU_MEMORY_UTIL="${QUANT_GPU_MEM_UTIL[$QUANT_IDX]}"
-MIN_VRAM="${QUANT_MIN_VRAM_MB[$QUANT_IDX]}"
-MIN_GPUS="${QUANT_MIN_GPU_COUNT[$QUANT_IDX]}"
-MODEL_SIZE="${QUANT_MODEL_SIZES[$QUANT_IDX]}"
-
-SERVED_NAME="qwen3-27b"
-WORK_DIR="$HOME/qwen-27b-vllm"
-SERVICE_NAME="vllm-qwen-27b"
-MODEL_DISPLAY="Qwen3.6-27B ($QUANT_KEY)"
-
-# ===================================================================
-# Confirm and install
-# ===================================================================
-echo ""
-print_header "$MODEL_DISPLAY vLLM Setup"
-echo ""
-echo "  Model:          $HF_MODEL"
-echo "  Quantization:   ${QUANT_NAMES[$QUANT_IDX]}"
-echo "  Model size:     ${QUANT_VRAM[$QUANT_IDX]}"
-echo "  GPUs:           ${QUANT_GPU_CONFIGS[$QUANT_IDX]}"
-echo "  Tensor parallel: $TENSOR_PARALLEL"
-echo "  Max context:    $MAX_MODEL_LEN tokens"
-if [ "$ENABLE_TOOL_CALLING" = "true" ]; then
-    echo "  Tool calling:   ENABLED"
-fi
-echo ""
-
-if [ "$AUTO_YES" = "false" ]; then
-    read -p "Continue with installation? (y/n) " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Installation cancelled."
-        exit 0
-    fi
-else
-    echo "Auto-confirmed (--yes flag)"
-fi
-
-# ===================================================================
-# Installation
-# ===================================================================
-update_system
-install_essential_packages
-verify_nvidia_drivers
-check_gpu_memory $MIN_VRAM $MIN_GPUS
-create_venv "$WORK_DIR"
-
-# Install dependencies in venv
-source "$WORK_DIR/venv/bin/activate"
-install_uv
-install_pytorch
-install_vllm "true"  # always use nightly for latest Qwen support
-install_hf_dependencies
-huggingface_login
-download_model "$HF_MODEL" "$MODEL_SIZE"
-
-# Generate API key
-API_KEY=$(generate_api_key "$WORK_DIR")
-
-# Create server start script
-create_vllm_start_script \
-    "$WORK_DIR" \
-    "$HF_MODEL" \
-    "$TENSOR_PARALLEL" \
-    "$MAX_MODEL_LEN" \
-    "$GPU_MEMORY_UTIL" \
-    "$SERVED_NAME" \
-    "$VLLM_QUANT_FLAGS" \
-    "$ENABLE_TOOL_CALLING" \
-    "" \
-    "$WORK_DIR/.api_key" \
-    "$PORT"
-
-# Create systemd service
-create_systemd_service \
-    "$SERVICE_NAME" \
-    "$WORK_DIR" \
-    "$MODEL_DISPLAY vLLM Server"
-
-configure_firewall "$PORT"
-
-# Create test script
-create_test_script \
-    "$WORK_DIR" \
-    "$SERVED_NAME" \
-    "$MODEL_DISPLAY"
-
-# ===================================================================
-# Completion
-# ===================================================================
-echo ""
-print_header "Installation Complete!"
-echo ""
-echo "  Model:     $MODEL_DISPLAY"
-echo "  Service:   $SERVICE_NAME"
-echo "  Directory: $WORK_DIR"
-echo "  API key:   $WORK_DIR/.api_key"
-echo ""
-print_info "Next steps:"
-echo ""
-echo "  1. Start the server:"
-echo "     sudo systemctl start $SERVICE_NAME.service"
-echo ""
-echo "  2. Wait for startup (watch for 'Uvicorn running on http://0.0.0.0:$PORT'):"
-echo "     sudo journalctl -u $SERVICE_NAME.service -f"
-echo ""
-echo "  3. Test the API:"
-echo "     cd $WORK_DIR && python3 test_api.py"
-echo ""
-echo "  4. Get your VM's external IP:"
-echo "     curl -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip"
-echo ""
-echo "  5. Get your API key:"
-echo "     cat $WORK_DIR/.api_key"
-echo ""
-print_warning "Configure GCP firewall to allow port $PORT:"
-echo "     gcloud compute firewall-rules create allow-vllm \\"
-echo "       --allow=tcp:$PORT \\"
-echo "       --source-ranges=YOUR_IP/32"
-echo ""
-echo "  Restart after VM reboot:"
-echo "     ./setup_vllm.sh --start-only"
-echo ""
-print_success "Setup complete!"

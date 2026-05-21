@@ -1,0 +1,35 @@
+services:
+  vllm-server:
+    image: vllm/vllm-openai:${VLLM_VERSION:-v0.21.0}
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
+      - vllm-compile-cache:/root/.cache/vllm
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    command: >
+      ${MODEL:-Qwen/Qwen3.6-27B-FP8}
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size ${TENSOR_PARALLEL:-2}
+      --max-model-len ${MAX_MODEL_LEN:-65536}
+      --gpu-memory-utilization ${GPU_MEM_UTIL:-0.95}
+      --enable-prefix-caching
+      --max-num-seqs 256
+      --served-model-name ${SERVED_NAME:-qwen3.6-27b}
+      --trust-remote-code
+      --dtype auto
+      --api-key ${API_KEY}
+      ${EXTRA_FLAGS:-}
+    restart: unless-stopped
+
+volumes:
+  vllm-compile-cache:

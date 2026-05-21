@@ -25,7 +25,7 @@ Create a GCP GPU VM, looping through zones until one has capacity.
 Usage: ./create_gpu_vm.sh [options]
 
 Options:
-  --gpu <l4|a100|a100x2>  GPU preset (default: l4)
+  --gpu <l4|a100|a100-80|a100x2>  GPU preset (default: l4)
   --name <name>           VM name (default: llm-<random>)
   --spot                  Use spot/preemptible pricing (~70% cheaper, can be preempted)
   --static-ip             Reserve a static external IP (persists across stop/start)
@@ -35,9 +35,10 @@ Options:
   --help, -h              Show this help
 
 GPU presets:
-  l4      2x L4 (48GB) — g2-standard-24
-  a100    1x A100 (40GB) — a2-highgpu-1g
-  a100x2  2x A100 (80GB) — a2-highgpu-2g
+  l4        2x L4 (48GB) — g2-standard-24
+  a100      1x A100 (40GB) — a2-highgpu-1g
+  a100-80   1x A100 (80GB) — a2-ultragpu-1g
+  a100x2    2x A100 (80GB) — a2-highgpu-2g
 
 Examples:
   ./create_gpu_vm.sh                              # 2x L4, loop all zones
@@ -108,16 +109,20 @@ if [ -z "$GPU_PRESET" ]; then
     echo "  2) 1x A100 (40GB) — a2-highgpu-1g"
     echo "     Fast inference (2TB/s bandwidth). Large context + high quants."
     echo ""
-    echo "  3) 2x A100 (80GB) — a2-highgpu-2g"
+    echo "  3) 1x A100 (80GB) — a2-ultragpu-1g"
+    echo "     MTP speculative decoding, large context, headroom for KV cache."
+    echo ""
+    echo "  4) 2x A100 (80GB) — a2-highgpu-2g"
     echo "     Full precision or very large models. vLLM multi-user serving."
     echo ""
     while true; do
-        read -p "GPU preset [1-3] (Enter for default): " choice
+        read -p "GPU preset [1-4] (Enter for default): " choice
         case "$choice" in
             ""|1) GPU_PRESET="l4"; break ;;
             2) GPU_PRESET="a100"; break ;;
-            3) GPU_PRESET="a100x2"; break ;;
-            *) echo "  Invalid choice. Enter 1-3 or press Enter for default." ;;
+            3) GPU_PRESET="a100-80"; break ;;
+            4) GPU_PRESET="a100x2"; break ;;
+            *) echo "  Invalid choice. Enter 1-4 or press Enter for default." ;;
         esac
     done
 
@@ -155,6 +160,12 @@ case "$GPU_PRESET" in
         GPU_COUNT=1
         GPU_LABEL="1x A100 (40GB)"
         ;;
+    a100-80)
+        MACHINE_TYPE="a2-ultragpu-1g"
+        GPU_TYPE="nvidia-a100-80gb"
+        GPU_COUNT=1
+        GPU_LABEL="1x A100 (80GB)"
+        ;;
     a100x2)
         MACHINE_TYPE="a2-highgpu-2g"
         GPU_TYPE="nvidia-tesla-a100"
@@ -163,7 +174,7 @@ case "$GPU_PRESET" in
         ;;
     *)
         echo "ERROR: Unknown GPU preset '${GPU_PRESET}'"
-        echo "Available: l4, a100, a100x2"
+        echo "Available: l4, a100, a100-80, a100x2"
         exit 1
         ;;
 esac
@@ -227,6 +238,9 @@ for ZONE in $ORDERED_ZONES; do
     AUTO_STOP_FLAGS=""
     if [ -n "$AUTO_STOP" ]; then
         AUTO_STOP_FLAGS="--max-run-duration=${AUTO_STOP} --instance-termination-action=STOP"
+        if [[ "$MACHINE_TYPE" == *ultragpu* ]]; then
+            AUTO_STOP_FLAGS="$AUTO_STOP_FLAGS --discard-local-ssds-at-termination-timestamp=true"
+        fi
     fi
 
     OUTPUT=$(gcloud compute instances create "$VM_NAME" \
@@ -331,7 +345,7 @@ for ZONE in $ORDERED_ZONES; do
     fi
 
     # VM creation failed — decide whether to retry or bail
-    if echo "$OUTPUT" | grep -qi "PERMISSION_DENIED\|forbidden\|invalid.*argument\|invalid.*value\|not found.*service.account\|image.*not found"; then
+    if echo "$OUTPUT" | grep -qi "PERMISSION_DENIED\|forbidden\|not found.*service.account\|image.*not found"; then
         echo "  FATAL: $OUTPUT"
         echo ""
         echo "This error will occur in every zone. Fix the issue and retry."
@@ -339,7 +353,7 @@ for ZONE in $ORDERED_ZONES; do
     fi
 
     # Retryable: capacity exhausted, subnet missing in region, quota, etc.
-    SHORT_ERR=$(echo "$OUTPUT" | grep -oi "ZONE_RESOURCE_POOL_EXHAUSTED\|stockout\|does not have enough resources\|quota.*exceeded\|subnet.*not found\|not exist in region" | head -1)
+    SHORT_ERR=$(echo "$OUTPUT" | grep -oi "ZONE_RESOURCE_POOL_EXHAUSTED\|stockout\|does not have enough resources\|quota.*exceeded\|subnet.*not found\|not exist in region\|does not exist in zone\|invalid.*value\|invalid.*argument" | head -1 || true)
     if [ -n "$SHORT_ERR" ]; then
         echo "  ${SHORT_ERR} — skipping"
     else

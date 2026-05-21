@@ -13,11 +13,10 @@ KV cache cost for Qwen 3.6-27B: ~128KB per token per user (FP16), ~64KB with FP8
 | Quantization | Model Weights | HF Repo | Quality vs BF16 |
 |-------------|--------------|---------|-----------------|
 | NVFP4 | ~14 GB | `unsloth/Qwen3.6-27B-NVFP4` | ~99% (MMLU-Pro 0.63 vs 0.64) |
-| AWQ (INT4) | ~17 GB | `cyankiwi/Qwen3.6-27B-AWQ-INT4` | ~97% |
 | FP8 | ~27 GB | `Qwen/Qwen3.6-27B-FP8` | ~99.5% |
 | BF16 | ~54 GB | `Qwen/Qwen3.6-27B` | baseline |
 
-NVFP4 and AWQ leave the most VRAM for KV cache. NVFP4 has better quality retention.
+NVFP4 leaves the most VRAM for KV cache with good quality retention.
 
 ## Capacity estimates (NVFP4 weights, FP8 KV cache)
 
@@ -68,14 +67,11 @@ Spot instances are ~70% cheaper (as of May 2026) but can be preempted.
 
 ## MTP (Multi-Token Prediction)
 
-Experimental speculative decoding that predicts multiple tokens per forward pass. ~30% faster generation but:
-- Does NOT support parallel requests (`-np > 1`) — single-user only
-- Requires a special llama.cpp branch (not vLLM)
-- Not useful for multi-user serving
+Speculative decoding using draft prediction heads built into the model. ~2x faster generation. Supports multi-GPU tensor parallelism and parallel request slots. Prompt processing speed is reduced (~50%).
 
 ## Things still to figure out
 
-- [ ] Benchmark NVFP4 vs AWQ on actual L4 hardware (quality + throughput)
+- [ ] Benchmark NVFP4 vs FP8 on actual L4 hardware (quality + throughput)
 - [ ] Test FP8 KV cache quality impact on long-context tasks
 - [ ] Measure real vs theoretical capacity with prefix caching enabled
 - [ ] Evaluate whether 4x A100 is worth it vs multiple 2x A100 instances

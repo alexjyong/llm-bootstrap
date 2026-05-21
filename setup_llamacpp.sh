@@ -26,28 +26,33 @@ MODEL_NAMES=(
     "Qwen 3.6-27B (dense)"
     "Qwen 3.6-35B-A3B (MoE)"
     "Qwen 3.5-122B-A10B (MoE)"
+    "Gemma 4 31B (dense)"
 )
 MODEL_DESCS=(
     "27B params, all active. Best quality per token."
     "35B total, 3B active per token. Fast, lower quality."
     "122B total, 10B active per token. Needs multi-GPU."
+    "31B params, dense. Google model, Apache 2.0."
 )
 MODEL_HF_REPOS=(
-    "lmstudio-community/Qwen3.6-27B-GGUF"
-    "lmstudio-community/Qwen3.6-35B-A3B-GGUF"
+    "unsloth/Qwen3.6-27B-GGUF"
+    "unsloth/Qwen3.6-35B-A3B-GGUF"
     "unsloth/Qwen3.5-122B-A10B-GGUF"
+    "unsloth/gemma-4-31b-it-GGUF"
 )
 MODEL_FILE_PATTERNS=(
     "Qwen3.6-27B"
     "Qwen3.6-35B-A3B"
     "Qwen3.5-122B-A10B"
+    "gemma-4-31B-it"
 )
-MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q4_K_M")
-MODEL_DIR_NAMES=("qwen-27b-llamacpp" "qwen-35b-llamacpp" "qwen-122b-llamacpp")
-MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "qwen3.5-122b-a10b")
+MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q4_K_M" "Q6_K")
+MODEL_DIR_NAMES=("qwen-27b-llamacpp" "qwen-35b-llamacpp" "qwen-122b-llamacpp" "gemma-31b-llamacpp")
+MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "qwen3.5-122b-a10b" "gemma4-31b")
 MODEL_MMPROJ_FILES=(
     "mmproj-Qwen3.6-27B-BF16.gguf"
     "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+    ""
     ""
 )
 
@@ -62,6 +67,8 @@ get_vram_estimate() {
         1:Q6_K)   echo "~32 GB" ;; 1:Q8_0)   echo "~38 GB" ;;
         2:Q3_K_M) echo "~62 GB" ;; 2:Q4_K_M) echo "~85 GB" ;; 2:Q5_K_M) echo "~100 GB" ;;
         2:Q6_K)   echo "~115 GB";; 2:Q8_0)   echo "~140 GB";;
+        3:Q3_K_M) echo "~15 GB" ;; 3:Q4_K_M) echo "~18 GB" ;; 3:Q5_K_M) echo "~22 GB" ;;
+        3:Q6_K)   echo "~25 GB" ;; 3:Q8_0)   echo "~33 GB" ;;
         *) echo "unknown" ;;
     esac
 }
@@ -84,15 +91,17 @@ PARALLEL=3
 ENABLE_THINKING=false
 KV_CACHE_PRESET=""
 CONTEXT_TARGET=""
+ENABLE_MTP=false
+IDENTIFIER=""
 
 show_usage() {
     cat << 'EOF'
-llama.cpp Setup for Qwen Models
+llama.cpp Setup
 
 Usage: ./setup_llamacpp.sh [options]
 
 Options:
-  --model <number|name>       Model selection (1=27B, 2=35B-A3B, 3=122B)
+  --model <number|name>       Model selection (1=27B, 2=35B-A3B, 3=122B, 4=Gemma31B)
   --quant <Q3_K_M|...|Q8_0>  Quantization level (skip interactive picker)
   --yes, -y                   Skip all prompts (non-interactive)
   --start-only                Skip installation, just start existing service
@@ -103,11 +112,14 @@ Options:
   --kv-cache <preset>         KV cache preset: q8_0, mixed, q4_0 (default: q8_0)
   --parallel <N>              Concurrent request slots (default: 4)
   --thinking                  Enable thinking mode (default: disabled)
+  --mtp                        Enable Multi-Token Prediction (27B only, ~2x faster generation)
+  --identifier <name>          Custom model ID for API requests (default: model name)
 
 Models:
   1  Qwen 3.6-27B        27B params, all active. Best quality per token.
   2  Qwen 3.6-35B-A3B    35B total, 3B active. Fast, lower quality.
   3  Qwen 3.5-122B-A10B  122B total, 10B active. Needs multi-GPU.
+  4  Gemma 4 31B          31B params, dense. Google model, Apache 2.0.
 
 Quants:     Q3_K_M, Q4_K_M, Q5_K_M, Q6_K, Q8_0
 KV cache:   q8_0 (best quality), mixed (q8 keys/q4 values), q4_0 (max context)
@@ -120,6 +132,7 @@ Examples:
   ./setup_llamacpp.sh --start-only                   # restart after VM reboot
   ./setup_llamacpp.sh --thinking                     # enable thinking mode
   ./setup_llamacpp.sh --kv-cache mixed --context-target 512k --yes  # extended context
+  ./setup_llamacpp.sh --model 1 --mtp --yes                        # MTP speculative decoding
 
 EOF
 }
@@ -165,6 +178,14 @@ while [[ $# -gt 0 ]]; do
         --thinking)
             ENABLE_THINKING=true
             shift
+            ;;
+        --mtp)
+            ENABLE_MTP=true
+            shift
+            ;;
+        --identifier)
+            IDENTIFIER="$2"
+            shift 2
             ;;
         --help|-h)
             show_usage
@@ -246,8 +267,54 @@ HF_REPO="${MODEL_HF_REPOS[$MODEL_IDX]}"
 FILE_PATTERN="${MODEL_FILE_PATTERNS[$MODEL_IDX]}"
 DIR_NAME="${MODEL_DIR_NAMES[$MODEL_IDX]}"
 MODEL_ALIAS="${MODEL_ALIASES[$MODEL_IDX]}"
+[ -n "$IDENTIFIER" ] && MODEL_ALIAS="$IDENTIFIER"
 MMPROJ_FILE="${MODEL_MMPROJ_FILES[$MODEL_IDX]}"
 WORK_DIR="$HOME/$DIR_NAME"
+
+# ===================================================================
+# MTP prompt (only for Qwen 3.6-27B)
+# ===================================================================
+if [ "$MODEL_IDX" = "0" ] && [ "$ENABLE_MTP" = "false" ] && [ "$AUTO_YES" = "false" ]; then
+    echo ""
+    echo "Enable Multi-Token Prediction (MTP)?"
+    echo "  ~2x faster generation using built-in draft prediction heads"
+    echo ""
+    echo "  1) No   (standard model weights)"
+    echo "  2) Yes  (use MTP model weights)"
+    echo ""
+    while true; do
+        read -p "MTP [1-2] (Enter for default): " choice
+        if [ -z "$choice" ] || [ "$choice" = "1" ]; then break; fi
+        if [ "$choice" = "2" ]; then ENABLE_MTP=true; break; fi
+        echo "  Invalid choice."
+    done
+fi
+
+if [ "$ENABLE_MTP" = "true" ] && [ "$MODEL_IDX" != "0" ]; then
+    echo "ERROR: MTP is only supported for Qwen 3.6-27B (model 1)."
+    exit 1
+fi
+
+if [ "$ENABLE_MTP" = "true" ]; then
+    HF_REPO="unsloth/Qwen3.6-27B-MTP-GGUF"
+    FILE_PATTERN="Qwen3.6-27B"
+    MMPROJ_FILE=""
+    QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0" "BF16")
+    MODEL_DEFAULT_QUANTS[0]="Q6_K"
+
+    get_vram_estimate() {
+        local model_idx=$1 quant=$2
+        case "$quant" in
+            Q3_K_M) echo "~16 GB" ;;
+            Q4_K_M) echo "~19 GB" ;;
+            Q5_K_M) echo "~22 GB" ;;
+            Q6_K)   echo "~25 GB" ;;
+            Q8_0)   echo "~32 GB" ;;
+            BF16)   echo "~58 GB" ;;
+            *) echo "unknown" ;;
+        esac
+    }
+fi
 
 # ===================================================================
 # Resolve quant
@@ -393,6 +460,7 @@ echo "  YaRN:        $YARN_DISPLAY"
 echo "  Parallel:    $PARALLEL slots"
 echo "  Port:        $PORT"
 echo "  Thinking:    $([ "$ENABLE_THINKING" = "true" ] && echo "ENABLED" || echo "disabled")"
+echo "  MTP:         $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
 echo "  Directory:   $WORK_DIR"
 echo ""
 
@@ -515,12 +583,22 @@ else
         exit 1
     fi
 
+    CUDA_ARCH=""
+    if command -v nvidia-smi &>/dev/null; then
+        CC_RAW=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1 | tr -d '.')
+        if [ -n "$CC_RAW" ]; then
+            CUDA_ARCH="-DCMAKE_CUDA_ARCHITECTURES=$CC_RAW"
+            echo "  Detected GPU compute capability: $CC_RAW"
+        fi
+    fi
+
     echo "  Configuring cmake..."
     cmake -B "$LLAMA_SRC/build" -S "$LLAMA_SRC" \
         -DGGML_CUDA=ON \
         -DGGML_NATIVE=OFF \
         -DCMAKE_BUILD_TYPE=Release \
         $CUDA_COMPILER \
+        $CUDA_ARCH \
         > /dev/null 2>&1
     echo "  Compiling ($(nproc) threads)..."
     cmake --build "$LLAMA_SRC/build" --config Release -j "$(nproc)" 2>&1 | \
@@ -549,20 +627,29 @@ mkdir -p "$WORK_DIR/models"
 
 MODEL_PATH="$WORK_DIR/models/$GGUF_FILENAME"
 
+NEED_DOWNLOAD=true
 if [ -f "$MODEL_PATH" ]; then
-    echo "  Model already downloaded."
-else
+    if [ -f "$WORK_DIR/models/.hf_repo" ] && [ "$(cat "$WORK_DIR/models/.hf_repo")" = "$HF_REPO" ]; then
+        echo "  Model already downloaded."
+        NEED_DOWNLOAD=false
+    else
+        echo "  Existing model is from a different repo — re-downloading..."
+        rm -f "$MODEL_PATH"
+    fi
+fi
+if [ "$NEED_DOWNLOAD" = "true" ]; then
     HF_CMD="hf"
     if ! command -v hf &>/dev/null; then
         HF_CMD="huggingface-cli"
     fi
-    $HF_CMD download "$HF_REPO" "$GGUF_FILENAME" \
-        --local-dir "$WORK_DIR/models" || {
+    $HF_CMD download "$HF_REPO" --local-dir "$WORK_DIR/models" \
+        -- "$GGUF_FILENAME" || {
         echo ""
         echo "  Download failed. Try manually:"
-        echo "    hf download $HF_REPO $GGUF_FILENAME --local-dir $WORK_DIR/models"
+        echo "    hf download $HF_REPO --local-dir $WORK_DIR/models -- $GGUF_FILENAME"
         exit 1
     }
+    echo "$HF_REPO" > "$WORK_DIR/models/.hf_repo"
     echo "  Model downloaded."
 fi
 
@@ -616,7 +703,7 @@ PROMPTEOF
 
 THINKING_FLAG=""
 if [ "$ENABLE_THINKING" = "false" ]; then
-    THINKING_FLAG="--chat-template-kwargs '{\"enable_thinking\":false}'"
+    THINKING_FLAG="--reasoning off"
 fi
 
 MMPROJ_FLAG=""
@@ -627,6 +714,11 @@ fi
 YARN_FLAG=""
 if [ "$USE_YARN" = "true" ]; then
     YARN_FLAG="--rope-scaling yarn"
+fi
+
+MTP_FLAGS=""
+if [ "$ENABLE_MTP" = "true" ]; then
+    MTP_FLAGS="--spec-type draft-mtp --spec-draft-n-max 3"
 fi
 
 SERVICE_NAME="llamacpp"
@@ -656,6 +748,7 @@ ExecStart=$WORK_DIR/bin/llama-server \\
     $MMPROJ_FLAG \\
     --jinja \\
     $THINKING_FLAG \\
+    $MTP_FLAGS \\
     --metrics
 Restart=on-failure
 RestartSec=10
@@ -781,6 +874,7 @@ echo "  Service:   $SERVICE_NAME"
 echo "  Directory: $WORK_DIR"
 echo "  API key:   $API_KEY_FILE"
 echo "  Thinking:  $([ "$ENABLE_THINKING" = "true" ] && echo "ENABLED" || echo "disabled")"
+echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo ""
 echo "  Next steps:"
 echo ""

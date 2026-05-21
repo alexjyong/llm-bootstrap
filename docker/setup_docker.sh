@@ -16,21 +16,25 @@ set -e
 MODEL_NAMES=(
     "Qwen 3.6-27B (dense)"
     "Qwen 3.6-35B-A3B (MoE)"
+    "Gemma 4 31B (dense)"
 )
 MODEL_HF_REPOS=(
-    "lmstudio-community/Qwen3.6-27B-GGUF"
-    "lmstudio-community/Qwen3.6-35B-A3B-GGUF"
+    "unsloth/Qwen3.6-27B-GGUF"
+    "unsloth/Qwen3.6-35B-A3B-GGUF"
+    "unsloth/gemma-4-31b-it-GGUF"
 )
 MODEL_FILE_PATTERNS=(
     "Qwen3.6-27B"
     "Qwen3.6-35B-A3B"
+    "gemma-4-31B-it"
 )
 MODEL_MMPROJ_FILES=(
     "mmproj-Qwen3.6-27B-BF16.gguf"
     "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+    ""
 )
-MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b")
-MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M")
+MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "gemma4-31b")
+MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q6_K")
 
 QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0")
 
@@ -49,6 +53,8 @@ CONTEXT_LENGTH=262144
 PARALLEL=3
 KV_CACHE_PRESET=""
 CONTEXT_TARGET=""
+ENABLE_MTP=false
+IDENTIFIER=""
 
 show_usage() {
     cat << 'EOF'
@@ -67,6 +73,8 @@ Options:
   --port <port>               API port (default: 8080)
   --context-length <N>        Exact context window in tokens (overrides --context-target)
   --parallel <N>              Concurrent slots (default: 3)
+  --mtp                       Enable Multi-Token Prediction (27B only, ~2x faster generation)
+  --identifier <name>         Custom model ID for API requests (default: model name)
 
 EOF
 }
@@ -82,6 +90,8 @@ while [[ $# -gt 0 ]]; do
         --parallel) PARALLEL="$2"; shift 2 ;;
         --kv-cache) KV_CACHE_PRESET="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
         --context-target) CONTEXT_TARGET="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
+        --mtp) ENABLE_MTP=true; shift ;;
+        --identifier) IDENTIFIER="$2"; shift 2 ;;
         --help|-h) show_usage; exit 0 ;;
         *) echo "Unknown option: $1"; show_usage; exit 1 ;;
     esac
@@ -105,7 +115,18 @@ fi
 # Resolve model
 # ===================================================================
 if [ -n "$MODEL_ARG" ]; then
-    MODEL_IDX=$(($MODEL_ARG - 1))
+    MODEL_IDX=-1
+    for i in "${!MODEL_NAMES[@]}"; do
+        if [ "$MODEL_ARG" = "$((i+1))" ] || [[ "${MODEL_NAMES[$i],,}" == *"${MODEL_ARG,,}"* ]]; then
+            MODEL_IDX=$i
+            break
+        fi
+    done
+    if [ "$MODEL_IDX" = "-1" ]; then
+        echo "ERROR: Unknown model '$MODEL_ARG'. Available:"
+        for i in "${!MODEL_NAMES[@]}"; do echo "  $((i+1))) ${MODEL_NAMES[$i]}"; done
+        exit 1
+    fi
 elif [ "$AUTO_YES" = "true" ]; then
     MODEL_IDX=0
 else
@@ -129,6 +150,39 @@ HF_REPO="${MODEL_HF_REPOS[$MODEL_IDX]}"
 FILE_PATTERN="${MODEL_FILE_PATTERNS[$MODEL_IDX]}"
 MMPROJ_FILE="${MODEL_MMPROJ_FILES[$MODEL_IDX]}"
 MODEL_ALIAS="${MODEL_ALIASES[$MODEL_IDX]}"
+[ -n "$IDENTIFIER" ] && MODEL_ALIAS="$IDENTIFIER"
+
+# ===================================================================
+# MTP prompt (only for Qwen 3.6-27B)
+# ===================================================================
+if [ "$MODEL_IDX" = "0" ] && [ "$ENABLE_MTP" = "false" ] && [ "$AUTO_YES" = "false" ]; then
+    echo ""
+    echo "Enable Multi-Token Prediction (MTP)?"
+    echo "  ~2x faster generation using built-in draft prediction heads"
+    echo ""
+    echo "  1) No   (standard model weights)"
+    echo "  2) Yes  (use MTP model weights)"
+    echo ""
+    while true; do
+        read -p "MTP [1-2] (Enter for default): " choice
+        if [ -z "$choice" ] || [ "$choice" = "1" ]; then break; fi
+        if [ "$choice" = "2" ]; then ENABLE_MTP=true; break; fi
+        echo "  Invalid choice."
+    done
+fi
+
+if [ "$ENABLE_MTP" = "true" ] && [ "$MODEL_IDX" != "0" ]; then
+    echo "ERROR: MTP is only supported for Qwen 3.6-27B (model 1)."
+    exit 1
+fi
+
+if [ "$ENABLE_MTP" = "true" ]; then
+    HF_REPO="unsloth/Qwen3.6-27B-MTP-GGUF"
+    FILE_PATTERN="Qwen3.6-27B"
+    MMPROJ_FILE=""
+    QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0" "BF16")
+    MODEL_DEFAULT_QUANTS[0]="Q6_K"
+fi
 
 # ===================================================================
 # Resolve quant
@@ -252,6 +306,9 @@ EXTRA_FLAGS=""
 if [ "$USE_YARN" = "true" ]; then
     EXTRA_FLAGS="--rope-scaling yarn"
 fi
+if [ "$ENABLE_MTP" = "true" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --spec-type draft-mtp --spec-draft-n-max 3"
+fi
 
 YARN_DISPLAY="off"
 [ "$USE_YARN" = "true" ] && YARN_DISPLAY="ENABLED (target: $CONTEXT_TARGET)"
@@ -270,6 +327,7 @@ echo "  YaRN:      $YARN_DISPLAY"
 echo "  Parallel:  $PARALLEL slots"
 echo "  Port:      $PORT"
 echo "  Image:     $DOCKER_IMAGE"
+echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
 echo ""
 
 if [ "$AUTO_YES" = "false" ]; then
@@ -334,14 +392,23 @@ if ! command -v hf &>/dev/null; then
 fi
 echo "  Using $HF_CMD"
 
+NEED_DOWNLOAD=true
 if [ -f "$WORK_DIR/models/$MODEL_FILE" ]; then
-    echo "  Model already downloaded."
-else
-    echo "  Downloading $MODEL_FILE (~23GB)..."
-    $HF_CMD download "$HF_REPO" "$MODEL_FILE" --local-dir "$WORK_DIR/models" || {
+    if [ -f "$WORK_DIR/models/.hf_repo" ] && [ "$(cat "$WORK_DIR/models/.hf_repo")" = "$HF_REPO" ]; then
+        echo "  Model already downloaded."
+        NEED_DOWNLOAD=false
+    else
+        echo "  Existing model is from a different repo — re-downloading..."
+        rm -f "$WORK_DIR/models/$MODEL_FILE"
+    fi
+fi
+if [ "$NEED_DOWNLOAD" = "true" ]; then
+    echo "  Downloading $MODEL_FILE from $HF_REPO..."
+    $HF_CMD download "$HF_REPO" --local-dir "$WORK_DIR/models" -- "$MODEL_FILE" || {
         echo "  Download failed."
         exit 1
     }
+    echo "$HF_REPO" > "$WORK_DIR/models/.hf_repo"
 fi
 
 if [ -n "$MMPROJ_FILE" ] && [ ! -f "$WORK_DIR/models/$MMPROJ_FILE" ]; then
@@ -380,10 +447,11 @@ fi
 API_KEY=$(cat "$API_KEY_FILE")
 
 cat > "$WORK_DIR/.env" << EOF
+DOCKER_IMAGE=$DOCKER_IMAGE
 API_KEY=$API_KEY
 MODELS_DIR=$WORK_DIR/models
 MODEL_FILE=$MODEL_FILE
-MMPROJ_FILE=$MMPROJ_FILE
+MMPROJ_FLAG=$([ -n "$MMPROJ_FILE" ] && echo "--mmproj /models/$MMPROJ_FILE" || echo "")
 MODEL_ALIAS=$MODEL_ALIAS
 PORT=$PORT
 CONTEXT_LENGTH=$CONTEXT_LENGTH
@@ -517,6 +585,7 @@ echo "  Deployment Complete!"
 echo "════════════════════════════════════════════"
 echo ""
 echo "  Model:    ${MODEL_NAMES[$MODEL_IDX]} ($QUANT)"
+echo "  MTP:      $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  API:      http://$EXTERNAL_IP:$PORT/v1/"
 echo "  API Key:  $API_KEY"
 echo "  Model ID: $MODEL_ALIAS"

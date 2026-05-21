@@ -26,13 +26,14 @@ Usage: ./llm.sh <command> [options]
 
 Deploy:
   deploy [vm-name] [options]      Deploy a backend to a VM (interactive wizard if no args)
-    --backend <name>              Backend: llamacpp, llamacpp-docker, vllm
+    --backend <name>              Backend: llamacpp, llamacpp-docker, vllm, vllm-docker
     --yes, -y                     Skip all prompts
     All other flags (--model, --quant, --port, --context-length, --start-only, etc.)
     are passed through to the setup script.
 
 Manage:
   list                            List all VMs (name, zone, status, IP)
+  info   <vm-name>                Show running server info (context, slots, model, VRAM)
   creds  <vm-name>                Show IP, port, API key, model ID, and base URL
   logs   <vm-name>                Show server logs (last 50 lines)
   config <vm-name> <key> <value>  Update a server setting and restart
@@ -148,6 +149,7 @@ detect_backend() {
         --command="
             if [ -f /etc/systemd/system/llamacpp.service ]; then echo llamacpp
             elif [ -f ~/llama-docker/.env ]; then echo llamacpp-docker
+            elif [ -f ~/vllm-docker/.env ]; then echo vllm-docker
             elif ls /etc/systemd/system/vllm-*.service >/dev/null 2>&1; then echo vllm
             fi
         " 2>/dev/null
@@ -174,20 +176,22 @@ ssh_command() {
 # ===================================================================
 # Deploy: TUI wizard
 # ===================================================================
-BACKEND_NAMES=("llamacpp" "llamacpp-docker" "vllm")
+BACKEND_NAMES=("llamacpp" "llamacpp-docker" "vllm" "vllm-docker")
 BACKEND_LABELS=(
     "llama.cpp — direct inference, no daemon, native thinking control"
     "llama.cpp (Docker) — pre-built, no compile step, fastest deploy"
     "vLLM — concurrent users, high throughput"
+    "vLLM (Docker) — official image, no pip install, fastest vLLM deploy"
 )
 MODEL_NAMES=(
     "Qwen 3.6-27B (dense)"
     "Qwen 3.6-35B-A3B (MoE)"
     "Qwen 3.5-122B-A10B (MoE)"
+    "Gemma 4 31B (dense)"
 )
-MODEL_ARGS=("1" "2" "3")
+MODEL_ARGS=("1" "2" "3" "4")
 QUANT_OPTIONS_LLAMACPP=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0")
-QUANT_OPTIONS_VLLM=("AWQ" "FP8" "BF16")
+QUANT_OPTIONS_VLLM=("NVFP4" "FP8" "BF16")
 
 pick_vm() {
     echo ""
@@ -248,13 +252,23 @@ pick_backend() {
     done
 }
 
+SELECTED_MODEL=""
+
 pick_model() {
-    if [ "$BACKEND" = "vllm" ]; then return; fi
+    if [ "$BACKEND" = "vllm" ] || [ "$BACKEND" = "vllm-docker" ]; then return; fi
     local has_model=false
     for flag in "${SETUP_FLAGS[@]}"; do
         [ "$flag" = "--model" ] && has_model=true
     done
-    if [ "$has_model" = "true" ]; then return; fi
+    if [ "$has_model" = "true" ]; then
+        for i in "${!SETUP_FLAGS[@]}"; do
+            if [ "${SETUP_FLAGS[$i]}" = "--model" ]; then
+                SELECTED_MODEL="${SETUP_FLAGS[$((i+1))]}"
+                break
+            fi
+        done
+        return
+    fi
 
     echo ""
     echo "Select model:"
@@ -266,10 +280,102 @@ pick_model() {
     while true; do
         read -p "Model [1-${#MODEL_NAMES[@]}]: " choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#MODEL_NAMES[@]} ]; then
-            SETUP_FLAGS+=("--model" "${MODEL_ARGS[$((choice - 1))]}")
+            SELECTED_MODEL="${MODEL_ARGS[$((choice - 1))]}"
+            SETUP_FLAGS+=("--model" "$SELECTED_MODEL")
             break
         fi
         echo "  Invalid choice."
+    done
+}
+
+pick_mtp() {
+    local has_mtp=false
+    for flag in "${SETUP_FLAGS[@]}"; do
+        [ "$flag" = "--mtp" ] && has_mtp=true
+    done
+    if [ "$has_mtp" = "true" ]; then return; fi
+
+    # For llama.cpp backends: only available for model 1 (27B)
+    # For vLLM: always available (only serves 27B)
+    if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "vllm-docker" ] && [ "$SELECTED_MODEL" != "1" ]; then return; fi
+
+    local mtp_desc="~2x faster generation using built-in draft prediction heads"
+    local mtp_warn=""
+    if [ "$BACKEND" = "vllm" ] || [ "$BACKEND" = "vllm-docker" ]; then
+        mtp_desc="~2x faster generation, uses model's built-in MTP heads"
+        mtp_warn="  WARNING: MTP on vLLM is incompatible with tool calling (empty responses, hangs)"
+    fi
+
+    echo ""
+    echo "Enable Multi-Token Prediction (MTP)?"
+    echo "  $mtp_desc"
+    if [ -n "$mtp_warn" ]; then
+        echo ""
+        echo "$mtp_warn"
+    fi
+    echo ""
+    echo "  1) No   (standard inference)"
+    echo "  2) Yes  (speculative decoding with MTP)"
+    echo ""
+    while true; do
+        read -p "MTP [1-2] (Enter for default): " choice
+        if [ -z "$choice" ] || [ "$choice" = "1" ]; then break; fi
+        if [ "$choice" = "2" ]; then SETUP_FLAGS+=("--mtp"); break; fi
+        echo "  Invalid choice."
+    done
+}
+
+pick_identifier() {
+    local has_id=false
+    for flag in "${SETUP_FLAGS[@]}"; do
+        [ "$flag" = "--identifier" ] && has_id=true
+    done
+    if [ "$has_id" = "true" ]; then return; fi
+
+    local default_id="(auto from model)"
+
+    echo ""
+    read -p "Custom model ID (default: $default_id): " id_input
+    if [ -n "$id_input" ]; then
+        SETUP_FLAGS+=("--identifier" "$id_input")
+    fi
+}
+
+pick_tool_calling() {
+    if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "vllm-docker" ]; then return; fi
+    local has_tc=false has_mtp=false
+    for flag in "${SETUP_FLAGS[@]}"; do
+        [[ "$flag" == *"tool-calling"* ]] && has_tc=true
+        [ "$flag" = "--mtp" ] && has_mtp=true
+    done
+    if [ "$has_tc" = "true" ] || [ "$has_mtp" = "true" ]; then return; fi
+
+    SETUP_FLAGS+=("--enable-tool-calling")
+}
+
+pick_parallel() {
+    if [ "$BACKEND" = "vllm" ] || [ "$BACKEND" = "vllm-docker" ]; then return; fi
+    local has_parallel=false
+    for flag in "${SETUP_FLAGS[@]}"; do
+        [ "$flag" = "--parallel" ] && has_parallel=true
+    done
+    if [ "$has_parallel" = "true" ]; then return; fi
+
+    echo ""
+    echo "Select parallel slots (concurrent users):"
+    echo ""
+    echo "  1) 1 slot   full context per request"
+    echo "  2) 2 slots"
+    echo "  3) 3 slots  (default)"
+    echo "  4) 4 slots"
+    echo ""
+    while true; do
+        read -p "Parallel [1-4] (Enter for default): " choice
+        case "$choice" in
+            ""|3) break ;;
+            1|2|4) SETUP_FLAGS+=("--parallel" "$choice"); break ;;
+            *) echo "  Invalid choice." ;;
+        esac
     done
 }
 
@@ -282,7 +388,7 @@ pick_quant() {
 
     local quants=()
     case "$BACKEND" in
-        vllm) quants=("${QUANT_OPTIONS_VLLM[@]}") ;;
+        vllm|vllm-docker) quants=("${QUANT_OPTIONS_VLLM[@]}") ;;
         *) quants=("${QUANT_OPTIONS_LLAMACPP[@]}") ;;
     esac
 
@@ -318,9 +424,9 @@ do_deploy() {
             --backend) BACKEND="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
             --zone) VM_ZONE="$2"; shift 2 ;;
             --yes|-y) AUTO_YES=true; SETUP_FLAGS+=("--yes"); shift ;;
-            --model|--quant|--port|--context-length|--identifier)
+            --model|--quant|--port|--context-length|--parallel|--identifier)
                 SETUP_FLAGS+=("$1" "$2"); shift 2 ;;
-            --enable-tool-calling|--tool-calling|--start-only)
+            --enable-tool-calling|--tool-calling|--start-only|--mtp)
                 SETUP_FLAGS+=("$1"); shift ;;
             -*) SETUP_FLAGS+=("$1"); shift ;;
             *)
@@ -335,15 +441,19 @@ do_deploy() {
     if [ -z "$BACKEND" ]; then
         pick_backend
         pick_model
+        pick_mtp
         pick_quant
+        pick_parallel
+        pick_tool_calling
+        pick_identifier
     fi
 
     # Validate backend
     case "$BACKEND" in
-        llamacpp|llamacpp-docker|vllm) ;;
+        llamacpp|llamacpp-docker|vllm|vllm-docker) ;;
         *)
             echo "ERROR: Unknown backend '$BACKEND'"
-            echo "Available: llamacpp, llamacpp-docker, vllm"
+            echo "Available: llamacpp, llamacpp-docker, vllm, vllm-docker"
             exit 1 ;;
     esac
 
@@ -416,7 +526,11 @@ do_deploy() {
             ;;
         vllm)
             scp_to_vm "$VM_NAME" "$VM_ZONE" --recurse "$SCRIPT_DIR/vllm/"
-            REMOTE_CMD="chmod +x ~/vllm/setup_vllm.sh && ~/vllm/setup_vllm.sh ${SETUP_FLAGS[*]}"
+            REMOTE_CMD="chmod +x ~/vllm/setup_vllm.sh ~/vllm/vllm_common.sh && ~/vllm/setup_vllm.sh ${SETUP_FLAGS[*]}"
+            ;;
+        vllm-docker)
+            scp_to_vm "$VM_NAME" "$VM_ZONE" --recurse "$SCRIPT_DIR/vllm/"
+            REMOTE_CMD="chmod +x ~/vllm/setup_vllm.sh ~/vllm/vllm_common.sh && ~/vllm/setup_vllm.sh --docker ${SETUP_FLAGS[*]}"
             ;;
     esac
 
@@ -457,6 +571,7 @@ do_deploy() {
     DEFAULT_PORT=8000
     case "$BACKEND" in
         llamacpp|llamacpp-docker) DEFAULT_PORT=8080 ;;
+        vllm|vllm-docker) DEFAULT_PORT=8000 ;;
     esac
 
     echo ""
@@ -470,8 +585,10 @@ do_deploy() {
     echo "  API:      http://${EXTERNAL_IP}:${DEFAULT_PORT}/v1/"
     echo ""
     echo "  Creds:    ./llm.sh creds $VM_NAME"
+    echo "  Info:     ./llm.sh info $VM_NAME"
     echo "  Test:     ./llm.sh test $VM_NAME"
     echo "  Stop:     ./llm.sh stop $VM_NAME"
+    echo "  Logs:     ./llm.sh logs $VM_NAME"
     echo "  Resume:   ./llm.sh resume $VM_NAME"
     echo ""
 }
@@ -595,7 +712,7 @@ case "$COMMAND" in
             --format="get(networkInterfaces[0].accessConfigs[0].natIP)"
         ;;
 
-    creds|info)
+    creds)
         parse_vm_args "$@"
         ZONE=$(resolve_zone "$VM_NAME" "$VM_ZONE")
         IP=$(gcloud compute instances describe "$VM_NAME" \
@@ -606,7 +723,7 @@ case "$COMMAND" in
             --zone="$ZONE" \
             --project="$PROJECT" \
             --command="
-                KEY=\$(cat ~/qwen-*/.api_key 2>/dev/null || cat ~/llama-docker/.api_key 2>/dev/null || echo '(not found)')
+                KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '(not found)')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
                 MODEL=\$(curl -s -H \"Authorization: Bearer \$KEY\" http://localhost:\$PORT/v1/models 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"data\"][0][\"id\"])' 2>/dev/null || echo '(unknown)')
                 echo \"\$KEY|\$PORT|\$MODEL\"
@@ -699,7 +816,8 @@ case "$COMMAND" in
                 fi
             " 2>/dev/null
 
-        echo "  Done. Verify with: ./llm.sh creds $VM_NAME"
+        echo "  Done. Verify with: ./llm.sh info $VM_NAME"
+        echo "  Note: some changes may take a few seconds or so to apply."
         ;;
 
     test)
@@ -719,7 +837,7 @@ case "$COMMAND" in
             --zone="$ZONE" \
             --project="$PROJECT" \
             --command="
-                KEY=\$(cat ~/qwen-*/.api_key 2>/dev/null || cat ~/llama-docker/.api_key 2>/dev/null || echo '')
+                KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
                 echo \"\$KEY|\$PORT\"
             " 2>/dev/null)
@@ -763,7 +881,7 @@ case "$COMMAND" in
         else
             echo "FAIL"
             FAIL=$((FAIL + 1))
-            MODEL="qwen3.6-27b"
+            MODEL="unknown"
         fi
 
         # 3. Auth check (inference without key should fail)
@@ -832,13 +950,105 @@ case "$COMMAND" in
         [ "$FAIL" -eq 0 ] || exit 1
         ;;
 
+    info)
+        parse_vm_args "$@"
+        ZONE=$(resolve_zone "$VM_NAME" "$VM_ZONE")
+        IP=$(gcloud compute instances describe "$VM_NAME" \
+            --zone="$ZONE" \
+            --project="$PROJECT" \
+            --format="get(networkInterfaces[0].accessConfigs[0].natIP)" 2>/dev/null)
+
+        if [ -z "$IP" ]; then
+            echo "ERROR: Could not get IP for $VM_NAME"
+            exit 1
+        fi
+
+        CREDS=$(gcloud compute ssh "$VM_NAME" \
+            --zone="$ZONE" \
+            --project="$PROJECT" \
+            --command="
+                KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '')
+                PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
+                echo \"\$KEY|\$PORT\"
+            " 2>/dev/null)
+        API_KEY=$(echo "$CREDS" | cut -d'|' -f1)
+        PORT=$(echo "$CREDS" | cut -d'|' -f2)
+        BASE="http://$IP:$PORT"
+
+        PROPS=$(curl -s --max-time 10 \
+            -H "Authorization: Bearer $API_KEY" \
+            "$BASE/props" 2>/dev/null)
+
+        VLLM_MODELS=$(curl -s --max-time 10 \
+            -H "Authorization: Bearer $API_KEY" \
+            "$BASE/v1/models" 2>/dev/null)
+
+        IS_VLLM=false
+        if echo "$PROPS" | python3 -c 'import sys,json; json.load(sys.stdin)["default_generation_settings"]' 2>/dev/null; then
+            IS_VLLM=false
+        elif echo "$VLLM_MODELS" | python3 -c 'import sys,json; json.load(sys.stdin)["data"]' 2>/dev/null; then
+            IS_VLLM=true
+        else
+            echo "ERROR: Server not responding at $BASE"
+            exit 1
+        fi
+
+        GPU_INFO=$(gcloud compute ssh "$VM_NAME" \
+            --zone="$ZONE" \
+            --project="$PROJECT" \
+            --command="nvidia-smi --query-gpu=name,memory.total,memory.used,memory.free --format=csv,noheader" 2>/dev/null)
+
+        if [ "$IS_VLLM" = "true" ]; then
+            N_CTX=$(echo "$VLLM_MODELS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["max_model_len"])' 2>/dev/null)
+            MODEL=$(echo "$VLLM_MODELS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["id"])' 2>/dev/null)
+            MODEL_PATH=$(echo "$VLLM_MODELS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["data"][0]["root"])' 2>/dev/null)
+            SLOTS="dynamic"
+        else
+            N_CTX=$(echo "$PROPS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["default_generation_settings"]["n_ctx"])' 2>/dev/null)
+            SLOTS=$(echo "$PROPS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["total_slots"])' 2>/dev/null)
+            MODEL=$(echo "$PROPS" | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_alias"])' 2>/dev/null)
+            MODEL_PATH=$(echo "$PROPS" | python3 -c 'import sys,json; import os; print(os.path.basename(json.load(sys.stdin)["model_path"]))' 2>/dev/null)
+        fi
+
+        echo ""
+        echo "════════════════════════════════════════════"
+        echo "  Server Info: $VM_NAME"
+        echo "════════════════════════════════════════════"
+        echo ""
+        echo "  Model:        $MODEL ($MODEL_PATH)"
+        echo "  API:          $BASE/v1/"
+        if [ "$SLOTS" = "dynamic" ]; then
+            echo "  Context:      $N_CTX tokens ($((N_CTX / 1024))K) per request"
+            echo "  Concurrency:  dynamic (PagedAttention)"
+        else
+            TOTAL_CTX=$((N_CTX * SLOTS))
+            echo "  Context:      $TOTAL_CTX tokens ($((TOTAL_CTX / 1024))K) total"
+            echo "  Slots:        $SLOTS parallel"
+            echo "  Per slot:     $N_CTX tokens ($((N_CTX / 1024))K)"
+        fi
+        echo ""
+        echo "  GPUs:"
+        while IFS= read -r line; do
+            echo "    $line"
+        done <<< "$GPU_INFO"
+        echo ""
+        ;;
+
     logs)
         parse_vm_args "$@"
         ZONE=$(resolve_zone "$VM_NAME" "$VM_ZONE")
         gcloud compute ssh "$VM_NAME" \
             --zone="$ZONE" \
             --project="$PROJECT" \
-            --command="sudo journalctl -u llamacpp.service -u 'vllm-*.service' -n 50 --no-pager 2>/dev/null"
+            --command="
+                if [ -f ~/vllm-docker/.env ]; then
+                    cd ~/vllm-docker && sudo docker compose logs --tail=50 --no-log-prefix
+                elif [ -f ~/llama-docker/.env ]; then
+                    cd ~/llama-docker && sudo docker compose logs --tail=50 --no-log-prefix
+                else
+                    sudo journalctl -u llamacpp.service -u 'vllm-*.service' -n 50 --no-pager 2>/dev/null
+                fi
+            "
         ;;
 
     ""|--help|-h)

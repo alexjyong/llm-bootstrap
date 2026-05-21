@@ -1,6 +1,6 @@
 services:
   llama-server:
-    image: ghcr.io/alexjyong/llm-bootstrap/llama-server:latest
+    image: ${DOCKER_IMAGE:-ghcr.io/alexjyong/llm-bootstrap/llama-server:latest}
     build:
       context: .
       dockerfile: Dockerfile
@@ -30,8 +30,8 @@ services:
       ${EXTRA_FLAGS:-}
       --api-key ${API_KEY}
       --alias ${MODEL_ALIAS:-qwen3.6-27b}
-      --mmproj /models/${MMPROJ_FILE:-mmproj-Qwen3.6-27B-BF16.gguf}
+      ${MMPROJ_FLAG:-}
       --jinja
-      --chat-template-kwargs '{"enable_thinking":false}'
+      --reasoning off
       --metrics
     restart: unless-stopped
