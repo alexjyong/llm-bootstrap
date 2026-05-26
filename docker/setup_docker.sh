@@ -29,9 +29,9 @@ MODEL_FILE_PATTERNS=(
     "gemma-4-31B-it"
 )
 MODEL_MMPROJ_FILES=(
-    "mmproj-Qwen3.6-27B-BF16.gguf"
-    "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
-    ""
+    "mmproj-BF16.gguf"
+    "mmproj-BF16.gguf"
+    "mmproj-BF16.gguf"
 )
 MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "gemma4-31b")
 MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q6_K")
