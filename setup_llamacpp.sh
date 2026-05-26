@@ -50,10 +50,10 @@ MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q4_K_M" "Q6_K")
 MODEL_DIR_NAMES=("qwen-27b-llamacpp" "qwen-35b-llamacpp" "qwen-122b-llamacpp" "gemma-31b-llamacpp")
 MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "qwen3.5-122b-a10b" "gemma4-31b")
 MODEL_MMPROJ_FILES=(
-    "mmproj-Qwen3.6-27B-BF16.gguf"
-    "mmproj-Qwen3.6-35B-A3B-BF16.gguf"
+    "mmproj-BF16.gguf"
+    "mmproj-BF16.gguf"
     ""
-    ""
+    "mmproj-BF16.gguf"
 )
 
 QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0")
