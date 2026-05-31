@@ -67,12 +67,12 @@ Set up Qwen Code, pi.dev, OpenCode, Plandex, Continue, or the OpenAI SDK to use 
 
 **llama.cpp** (direct or Docker) is the recommended default. Use vLLM when you need high-throughput concurrent serving.
 
-| | llama.cpp | llama.cpp (Docker) | vLLM |
-|---|---|---|---|
-| **Setup** | Build from source (~15 min) | Pre-built image, no compile | Install via pip |
-| **Thinking control** | Native CLI flag | Via env var | N/A |
-| **Concurrent users** | `--parallel N` slots | `--parallel N` slots | Continuous batching |
-| **Best for** | Default, full control | Fast deploy | High throughput, many users |
+| | llama.cpp | llama.cpp (Docker) | vLLM | vLLM (Docker) |
+|---|---|---|---|---|
+| **Setup** | Build from source (~15 min) | Pre-built image, no compile | Install via pip | Official image, no pip install |
+| **Thinking control** | Native CLI flag | Via env var | N/A | N/A |
+| **Concurrent users** | `--parallel N` slots | `--parallel N` slots | Continuous batching | Continuous batching |
+| **Best for** | Default, full control | Fast deploy | High throughput, many users | Fastest vLLM deploy |
 
 All backends provide built-in OpenAI-compatible APIs with Bearer token auth.
 
@@ -84,16 +84,18 @@ Docs: [llama.cpp](docs/llamacpp.md) | [Docker](docs/docker.md) | [vLLM](vllm/)
 |--------|---------|------|------|----------|
 | `l4` (default) | g2-standard-24 | 2x L4 | 48GB | GGUF quants (Q4–Q8) |
 | `a100` | a2-highgpu-1g | 1x A100 | 40GB | Fast inference, large context |
+| `a100-80` | a2-ultragpu-1g | 1x A100 | 80GB | MTP, large context + headroom |
 | `a100x2` | a2-highgpu-2g | 2x A100 | 80GB | Full precision, multi-user vLLM |
 
 ```bash
 ./create_gpu_vm.sh                         # interactive picker
-./create_gpu_vm.sh --gpu a100              # 1x A100
+./create_gpu_vm.sh --gpu a100              # 1x A100 40GB
+./create_gpu_vm.sh --gpu a100-80           # 1x A100 80GB
 ./create_gpu_vm.sh --gpu a100 --static-ip  # permanent IP address
 ./create_gpu_vm.sh --gpu l4 --spot         # spot pricing (cheaper, can be preempted)
 ```
 
-VMs auto-stop after **8 hours** by default. Override with `--auto-stop 12h` or `--no-auto-stop`.
+VMs auto-stop after **4 hours** by default. Override with `--auto-stop 12h` or `--no-auto-stop`.
 
 ## Managing VMs
 
@@ -126,7 +128,7 @@ Use `--static-ip` when creating the VM to keep the same IP.
 | Engine | Options | Recommended |
 |--------|---------|-------------|
 | llama.cpp (GGUF) | Q3_K_M, Q4_K_M, Q5_K_M, Q6_K, Q8_0 | **Q6_K** (best quality/VRAM tradeoff) |
-| vLLM | AWQ (INT4), FP8, BF16 | **FP8** (near-lossless, fits on 2x L4) |
+| vLLM | NVFP4, FP8, BF16 | **FP8** (near-lossless, fits on 2x L4) |
 
 Higher quants = better quality but more VRAM. Hardware requirements: [docs/hardware.md](docs/hardware.md)
 

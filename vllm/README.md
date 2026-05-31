@@ -25,7 +25,7 @@ API is at `http://YOUR_VM_IP:8000/v1` with Bearer token auth (built-in, no nginx
 
 | Quant | VRAM | GPU Config | Quality |
 |-------|------|-----------|---------|
-| AWQ (INT4) | ~17GB | 1x L4 — g2-standard-12 | Good |
+| NVFP4 | ~14GB | 1x L4 — g2-standard-12 | ~99% of BF16 |
 | **FP8** (default) | ~27GB | 2x L4 — g2-standard-24 | Near-lossless |
 | BF16 (full) | ~54GB | 1x A100 80GB — a2-ultragpu-1g | Baseline |
 
@@ -34,7 +34,7 @@ API is at `http://YOUR_VM_IP:8000/v1` with Bearer token auth (built-in, no nginx
 ## CLI Flags
 
 ```
---quant <AWQ|FP8|BF16>    Quantization level (skip interactive picker)
+--quant <NVFP4|FP8|BF16>  Quantization level (skip interactive picker)
 --yes, -y                  Skip all prompts
 --start-only               Restart existing service (after VM reboot)
 --enable-tool-calling      Enable function/tool calling
@@ -59,6 +59,6 @@ watch -n 1 nvidia-smi                           # Monitor GPU
 | **Concurrent users** | `--parallel N` slots | Continuous batching |
 | **Setup** | Simple | More involved |
 | **Auth** | Built-in (`--api-key`) | Built-in (`--api-key`) |
-| **Quantization** | GGUF (Q3-Q8) | AWQ, FP8, BF16 |
+| **Quantization** | GGUF (Q3-Q8) | NVFP4, FP8, BF16 |
 | **Thinking control** | Native CLI flag | N/A |
 | **Best for** | Default, single user | Multiple users, throughput |
