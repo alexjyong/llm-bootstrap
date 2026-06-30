@@ -6,7 +6,7 @@
 
 set -euo pipefail
 
-PROJECT="${GCP_PROJECT:-your-project-id}"
+PROJECT="${GCP_PROJECT:?GCP_PROJECT is required. Please set GCP_PROJECT}"
 VM_NAME="llm-$(openssl rand -hex 3)"
 DISK_SIZE=250
 IMAGE="projects/ml-images/global/images/common-cu129-ubuntu-2204-nvidia-580-v20260430"
