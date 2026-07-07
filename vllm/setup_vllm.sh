@@ -52,6 +52,12 @@ do_start_only_docker() {
         warmup_vllm "$port" "$served_name" "$api_key"
     fi
 
+    if [ "$ENABLE_NGROK" = "true" ]; then
+        echo ""
+        source "$HOME/ngrok.sh"
+        ngrok_setup_if_enabled "true" "$port" "$AUTO_YES" || true
+    fi
+
     echo ""
     echo "Check logs: cd $work_dir && docker compose logs -f"
 }
@@ -133,6 +139,9 @@ print_docker_completion() {
     echo "  Model:    $MODEL_DISPLAY"
     echo "  MTP:      $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
     echo "  API:      http://$external_ip:$PORT/v1/"
+    if [ -f "$HOME/.ngrok_url" ]; then
+        echo "  ngrok:    $(cat "$HOME/.ngrok_url")/v1/"
+    fi
     echo "  API Key:  $API_KEY"
     echo "  Model ID: $SERVED_NAME"
     echo ""
@@ -160,6 +169,12 @@ do_start_only_native() {
     local api_key=""
     [ -f "$WORK_DIR/.api_key" ] && api_key=$(cat "$WORK_DIR/.api_key")
     warmup_vllm "$PORT" "$SERVED_NAME" "$api_key"
+
+    if [ "$ENABLE_NGROK" = "true" ]; then
+        echo ""
+        source "$HOME/ngrok.sh"
+        ngrok_setup_if_enabled "true" "$PORT" "$AUTO_YES" || true
+    fi
 
     echo ""
     echo "Check status:  sudo systemctl status $SERVICE_NAME.service"
@@ -238,11 +253,16 @@ print_native_completion() {
     echo "  5. Get your API key:"
     echo "     cat $WORK_DIR/.api_key"
     echo ""
-    print_warning "Configure GCP firewall to allow port $PORT:"
-    echo "     gcloud compute firewall-rules create allow-vllm \\"
-    echo "       --allow=tcp:$PORT \\"
-    echo "       --source-ranges=YOUR_IP/32"
-    echo ""
+    if [ -f "$HOME/.ngrok_url" ]; then
+        echo "  ngrok URL: $(cat "$HOME/.ngrok_url")"
+        echo ""
+    else
+        print_warning "Configure GCP firewall to allow port $PORT:"
+        echo "     gcloud compute firewall-rules create allow-vllm \\"
+        echo "       --allow=tcp:$PORT \\"
+        echo "       --source-ranges=YOUR_IP/32"
+        echo ""
+    fi
     echo "  Restart after VM reboot:"
     echo "     ./setup_vllm.sh --start-only"
     echo ""
@@ -281,10 +301,20 @@ if [ "$DEPLOY_MODE" = "docker" ]; then
     start_docker_container
     wait_for_healthy "$PORT"
     warmup_vllm "$PORT" "$SERVED_NAME" "$API_KEY"
+    if [ "$ENABLE_NGROK" = "true" ]; then
+        echo ""
+        source "$HOME/ngrok.sh"
+        ngrok_setup_if_enabled "true" "$PORT" "$AUTO_YES" || true
+    fi
     print_docker_completion
 else
     confirm_installation "Native"
     install_native
     configure_native
+    if [ "$ENABLE_NGROK" = "true" ]; then
+        echo ""
+        source "$HOME/ngrok.sh"
+        ngrok_setup_if_enabled "true" "$PORT" "$AUTO_YES" || true
+    fi
     print_native_completion
 fi

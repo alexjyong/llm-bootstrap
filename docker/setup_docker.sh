@@ -55,6 +55,8 @@ KV_CACHE_PRESET=""
 CONTEXT_TARGET=""
 ENABLE_MTP=false
 IDENTIFIER=""
+ENABLE_NGROK=false
+API_KEY_ARG=""
 
 show_usage() {
     cat << 'EOF'
@@ -75,6 +77,9 @@ Options:
   --parallel <N>              Concurrent slots (default: 3)
   --mtp                       Enable Multi-Token Prediction (27B only, ~2x faster generation)
   --identifier <name>         Custom model ID for API requests (default: model name)
+  --ngrok                     Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
+  --api-key <key>             Use this API key instead of generating a random one
+                              (also reads LLM_API_KEY from the environment)
 
 EOF
 }
@@ -92,6 +97,8 @@ while [[ $# -gt 0 ]]; do
         --context-target) CONTEXT_TARGET="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
         --mtp) ENABLE_MTP=true; shift ;;
         --identifier) IDENTIFIER="$2"; shift 2 ;;
+        --ngrok) ENABLE_NGROK=true; shift ;;
+        --api-key) API_KEY_ARG="$2"; shift 2 ;;
         --help|-h) show_usage; exit 0 ;;
         *) echo "Unknown option: $1"; show_usage; exit 1 ;;
     esac
@@ -108,6 +115,13 @@ if [ "$START_ONLY" = "true" ]; then
     echo "Starting container..."
     cd "$WORK_DIR" && sudo docker compose up -d
     echo "Started. Check logs: docker compose logs -f"
+
+    if [ "$ENABLE_NGROK" = "true" ]; then
+        ENV_PORT=$(grep "^PORT=" "$WORK_DIR/.env" 2>/dev/null | cut -d= -f2)
+        source "$HOME/ngrok.sh"
+        ngrok_setup_if_enabled "true" "${ENV_PORT:-$PORT}" "$AUTO_YES" || true
+    fi
+
     exit 0
 fi
 
@@ -440,7 +454,11 @@ sudo docker pull "$DOCKER_IMAGE" 2>/dev/null || {
 }
 
 API_KEY_FILE="$WORK_DIR/.api_key"
-if [ ! -f "$API_KEY_FILE" ]; then
+CUSTOM_API_KEY="${API_KEY_ARG:-${LLM_API_KEY:-}}"
+if [ -n "$CUSTOM_API_KEY" ]; then
+    echo "$CUSTOM_API_KEY" > "$API_KEY_FILE"
+    chmod 600 "$API_KEY_FILE"
+elif [ ! -f "$API_KEY_FILE" ]; then
     openssl rand -hex 32 > "$API_KEY_FILE"
     chmod 600 "$API_KEY_FILE"
 fi
@@ -486,6 +504,12 @@ for i in $(seq 1 30); do
 done
 
 EXTERNAL_IP=$(curl -s -H 'Metadata-Flavor: Google' http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null || echo "(unknown)")
+
+if [ "$ENABLE_NGROK" = "true" ]; then
+    echo ""
+    source "$HOME/ngrok.sh"
+    ngrok_setup_if_enabled "true" "$PORT" "$AUTO_YES" || true
+fi
 
 # ===================================================================
 # Generate test script
@@ -587,6 +611,9 @@ echo ""
 echo "  Model:    ${MODEL_NAMES[$MODEL_IDX]} ($QUANT)"
 echo "  MTP:      $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  API:      http://$EXTERNAL_IP:$PORT/v1/"
+if [ -f "$HOME/.ngrok_url" ]; then
+    echo "  ngrok:    $(cat "$HOME/.ngrok_url")/v1/"
+fi
 echo "  API Key:  $API_KEY"
 echo "  Model ID: $MODEL_ALIAS"
 echo ""

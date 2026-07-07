@@ -275,7 +275,12 @@ generate_api_key() {
     local work_dir=$1
 
     local key_file="$work_dir/.api_key"
-    if [ -f "$key_file" ]; then
+    local custom_key="${API_KEY_ARG:-${LLM_API_KEY:-}}"
+    if [ -n "$custom_key" ]; then
+        echo "$custom_key" > "$key_file"
+        chmod 600 "$key_file"
+        print_success "Using provided API key"
+    elif [ -f "$key_file" ]; then
         print_info "API key already exists at $key_file"
     else
         openssl rand -hex 32 > "$key_file"
@@ -673,6 +678,8 @@ parse_vllm_args() {
     PORT=8000
     IDENTIFIER=""
     DEPLOY_MODE="native"
+    ENABLE_NGROK=false
+    API_KEY_ARG=""
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -684,6 +691,8 @@ parse_vllm_args() {
             --mtp) ENABLE_MTP=true; shift ;;
             --identifier) IDENTIFIER="$2"; shift 2 ;;
             --port) PORT="$2"; shift 2 ;;
+            --ngrok) ENABLE_NGROK=true; shift ;;
+            --api-key) API_KEY_ARG="$2"; shift 2 ;;
             --help|-h) show_vllm_usage; exit 0 ;;
             *) echo "Unknown option: $1"; show_vllm_usage; exit 1 ;;
         esac
@@ -705,6 +714,9 @@ Options:
   --mtp                          Enable Multi-Token Prediction (~2x faster generation)
   --port <port>                  API port (default: 8000)
   --identifier <name>            Custom model ID for API requests (default: qwen3.6-27b)
+  --ngrok                        Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
+  --api-key <key>                Use this API key instead of generating a random one
+                                  (also reads LLM_API_KEY from the environment)
 
 Quantization options:
   NVFP4  NVIDIA FP4, ~14GB — fits on 1x L4 (24GB), best for multi-user

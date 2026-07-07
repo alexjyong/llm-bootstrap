@@ -34,6 +34,8 @@ Set your GCP project ID and subnet name as environment variables. These will be 
 ```bash
 export GCP_PROJECT="your-project-id"
 export GCP_SUBNET="default"         # optional, defaults to "default"
+export NGROK_AUTHTOKEN="..."        # optional, only needed for --ngrok deploys
+export LLM_API_KEY="..."            # optional, use a fixed API key instead of a random one
 ```
 
 If you are using a custom VPC or non-default subnet, ensure `GCP_SUBNET` matches your configuration.
@@ -150,6 +152,27 @@ gcloud compute firewall-rules create allow-llm-api \
 Port `8080` is llama.cpp, port `8000` is vLLM. All backends require a Bearer token regardless of firewall rules.
 
 Set `GCP_SUBNET` to use a different subnet. It must exist in the region where the VM is created — `create_gpu_vm.sh` loops through zones and skips regions where the subnet isn't available.
+
+### Exposing via ngrok
+
+Pass `--ngrok` to `deploy` (or answer "yes" to the wizard prompt) to tunnel the backend through [ngrok](https://ngrok.com) instead of relying on the VM's ephemeral IP:
+
+```bash
+export NGROK_AUTHTOKEN="..."   # from https://dashboard.ngrok.com/get-started/your-authtoken
+./llm.sh deploy VM_NAME --backend llamacpp --ngrok --yes
+```
+
+No firewall rule is needed for the backend port — `./llm.sh creds`/`test`/`info` will show and use the `https://*.ngrok-free.app` URL once it's live. On the free tier this URL changes every time the `ngrok` service restarts (e.g. on VM reboot); use a reserved domain in your ngrok account if you need a stable URL.
+
+### Using a fixed API key
+
+By default every deploy generates a new random API key (`openssl rand -hex 32`) for the backend. To reuse the same key across VMs — e.g. so you don't have to update client configs every time you redeploy — pass `--api-key` (or answer the wizard prompt), or set `LLM_API_KEY`:
+
+```bash
+export LLM_API_KEY="sk-my-fixed-key"
+./llm.sh deploy VM_NAME --backend llamacpp --yes
+# or: ./llm.sh deploy VM_NAME --backend llamacpp --api-key sk-my-fixed-key --yes
+```
 
 ### Other
 

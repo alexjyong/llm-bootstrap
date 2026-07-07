@@ -13,7 +13,7 @@
 
 set -euo pipefail
 
-PROJECT="${GCP_PROJECT:-your-project-id}"
+PROJECT="${GCP_PROJECT:-iiis-522294}"
 
 # ===================================================================
 # Help
@@ -28,6 +28,10 @@ Deploy:
   deploy [vm-name] [options]      Deploy a backend to a VM (interactive wizard if no args)
     --backend <name>              Backend: llamacpp, llamacpp-docker, vllm, vllm-docker
     --yes, -y                     Skip all prompts
+    --ngrok                       Expose the server via an ngrok tunnel instead of a raw IP
+                                   (needs NGROK_AUTHTOKEN env var, or you'll be prompted)
+    --api-key <key>               Use this API key instead of generating a random one
+                                   (also reads LLM_API_KEY from the environment)
     All other flags (--model, --quant, --port, --context-length, --start-only, etc.)
     are passed through to the setup script.
 
@@ -54,9 +58,17 @@ Config keys:
 
 All commands auto-detect the VM's zone. Use --zone to override.
 
+Env vars:
+  GCP_PROJECT       GCP project ID (default: iiis-522294)
+  NGROK_AUTHTOKEN   ngrok authtoken, used when --ngrok is passed (get one at
+                    https://dashboard.ngrok.com/get-started/your-authtoken)
+  LLM_API_KEY       API key for the backend, used instead of generating a random one
+
 Examples:
   ./llm.sh deploy                                              # interactive wizard
   ./llm.sh deploy my-llm --backend llamacpp --quant Q6_K --yes # non-interactive
+  ./llm.sh deploy my-llm --backend llamacpp --ngrok --yes      # expose via ngrok tunnel
+  ./llm.sh deploy my-llm --backend llamacpp --api-key sk-my-key --yes # custom API key
   ./llm.sh list
   ./llm.sh creds my-llm
   ./llm.sh config my-llm context-length 262144
@@ -341,6 +353,47 @@ pick_identifier() {
     fi
 }
 
+pick_ngrok() {
+    local has_ngrok=false
+    for flag in "${SETUP_FLAGS[@]}"; do
+        [ "$flag" = "--ngrok" ] && has_ngrok=true
+    done
+    if [ "$has_ngrok" = "true" ]; then return; fi
+
+    echo ""
+    read -p "Expose via ngrok tunnel instead of a raw IP? (y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then return; fi
+
+    if [ -z "${NGROK_AUTHTOKEN:-}" ]; then
+        read -p "  Enter your ngrok authtoken (https://dashboard.ngrok.com/get-started/your-authtoken): " NGROK_AUTHTOKEN
+        if [ -z "$NGROK_AUTHTOKEN" ]; then
+            echo "  No token entered, skipping ngrok."
+            return
+        fi
+        export NGROK_AUTHTOKEN
+    fi
+
+    SETUP_FLAGS+=("--ngrok")
+}
+
+pick_api_key() {
+    if [ -n "${LLM_API_KEY:-}" ]; then return; fi
+
+    echo ""
+    read -p "Use a custom API key instead of a random one? (y/n): " -n 1 -r
+    echo
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then return; fi
+
+    read -p "  Enter API key: " LLM_API_KEY
+    if [ -z "$LLM_API_KEY" ]; then
+        echo "  No key entered, a random one will be generated."
+        unset LLM_API_KEY
+        return
+    fi
+    export LLM_API_KEY
+}
+
 pick_tool_calling() {
     if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "vllm-docker" ]; then return; fi
     local has_tc=false has_mtp=false
@@ -424,9 +477,10 @@ do_deploy() {
             --backend) BACKEND="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
             --zone) VM_ZONE="$2"; shift 2 ;;
             --yes|-y) AUTO_YES=true; SETUP_FLAGS+=("--yes"); shift ;;
+            --api-key) LLM_API_KEY="$2"; shift 2 ;;
             --model|--quant|--port|--context-length|--parallel|--identifier)
                 SETUP_FLAGS+=("$1" "$2"); shift 2 ;;
-            --enable-tool-calling|--tool-calling|--start-only|--mtp)
+            --enable-tool-calling|--tool-calling|--start-only|--mtp|--ngrok)
                 SETUP_FLAGS+=("$1"); shift ;;
             -*) SETUP_FLAGS+=("$1"); shift ;;
             *)
@@ -446,6 +500,8 @@ do_deploy() {
         pick_parallel
         pick_tool_calling
         pick_identifier
+        pick_ngrok
+        pick_api_key
     fi
 
     # Validate backend
@@ -515,6 +571,8 @@ do_deploy() {
     echo ""
     echo "Uploading scripts..."
 
+    scp_to_vm "$VM_NAME" "$VM_ZONE" "$SCRIPT_DIR/ngrok.sh"
+
     case "$BACKEND" in
         llamacpp)
             scp_to_vm "$VM_NAME" "$VM_ZONE" "$SCRIPT_DIR/setup_llamacpp.sh"
@@ -547,8 +605,18 @@ do_deploy() {
         GH_TOKEN_EXPORT="export GH_TOKEN='${GH_TOKEN:-${GITHUB_TOKEN:-}}' && "
     fi
 
+    NGROK_TOKEN_EXPORT=""
+    if [ -n "${NGROK_AUTHTOKEN:-}" ]; then
+        NGROK_TOKEN_EXPORT="export NGROK_AUTHTOKEN='${NGROK_AUTHTOKEN}' && "
+    fi
+
+    LLM_API_KEY_EXPORT=""
+    if [ -n "${LLM_API_KEY:-}" ]; then
+        LLM_API_KEY_EXPORT="export LLM_API_KEY='${LLM_API_KEY}' && "
+    fi
+
     SETUP_LOG="/tmp/deploy-setup.log"
-    WRAPPED_CMD="${GH_TOKEN_EXPORT}set -o pipefail; $REMOTE_CMD 2>&1 | tee $SETUP_LOG"
+    WRAPPED_CMD="${GH_TOKEN_EXPORT}${NGROK_TOKEN_EXPORT}${LLM_API_KEY_EXPORT}set -o pipefail; $REMOTE_CMD 2>&1 | tee $SETUP_LOG"
 
     gcloud compute ssh "$VM_NAME" \
         --zone="$VM_ZONE" \
@@ -573,6 +641,8 @@ do_deploy() {
         llamacpp|llamacpp-docker) DEFAULT_PORT=8080 ;;
         vllm|vllm-docker) DEFAULT_PORT=8000 ;;
     esac
+    NGROK_URL=$(gcloud compute ssh "$VM_NAME" --zone="$VM_ZONE" --project="$PROJECT" \
+        --command="cat ~/.ngrok_url 2>/dev/null" 2>/dev/null || true)
 
     echo ""
     echo "════════════════════════════════════════════"
@@ -583,6 +653,9 @@ do_deploy() {
     echo "  Backend:  $BACKEND"
     echo "  IP:       ${EXTERNAL_IP:-(pending)}"
     echo "  API:      http://${EXTERNAL_IP}:${DEFAULT_PORT}/v1/"
+    if [ -n "$NGROK_URL" ]; then
+        echo "  ngrok:    ${NGROK_URL}/v1/"
+    fi
     echo ""
     echo "  Creds:    ./llm.sh creds $VM_NAME"
     echo "  Info:     ./llm.sh info $VM_NAME"
@@ -726,17 +799,22 @@ case "$COMMAND" in
                 KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '(not found)')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
                 MODEL=\$(curl -s -H \"Authorization: Bearer \$KEY\" http://localhost:\$PORT/v1/models 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"data\"][0][\"id\"])' 2>/dev/null || echo '(unknown)')
-                echo \"\$KEY|\$PORT|\$MODEL\"
+                NGROK_URL=\$(cat ~/.ngrok_url 2>/dev/null || echo '')
+                echo \"\$KEY|\$PORT|\$MODEL|\$NGROK_URL\"
             " 2>/dev/null)
         API_KEY=$(echo "$CREDS" | cut -d'|' -f1)
         PORT=$(echo "$CREDS" | cut -d'|' -f2)
         MODEL=$(echo "$CREDS" | cut -d'|' -f3)
+        NGROK_URL=$(echo "$CREDS" | cut -d'|' -f4)
+        BASE_URL="http://$IP:$PORT/v1/"
+        [ -n "$NGROK_URL" ] && BASE_URL="${NGROK_URL}/v1/"
         echo ""
         echo "  IP:       $IP"
         echo "  Port:     $PORT"
         echo "  Model:    $MODEL"
         echo "  API Key:  $API_KEY"
-        echo "  Base URL: http://$IP:$PORT/v1/"
+        echo "  Base URL: $BASE_URL"
+        [ -n "$NGROK_URL" ] && echo "  Direct:   http://$IP:$PORT/v1/"
         echo ""
         ;;
 
@@ -839,11 +917,14 @@ case "$COMMAND" in
             --command="
                 KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
-                echo \"\$KEY|\$PORT\"
+                NGROK_URL=\$(cat ~/.ngrok_url 2>/dev/null || echo '')
+                echo \"\$KEY|\$PORT|\$NGROK_URL\"
             " 2>/dev/null)
         API_KEY=$(echo "$CREDS" | cut -d'|' -f1)
         PORT=$(echo "$CREDS" | cut -d'|' -f2)
+        NGROK_URL=$(echo "$CREDS" | cut -d'|' -f3)
         BASE="http://$IP:$PORT"
+        [ -n "$NGROK_URL" ] && BASE="$NGROK_URL"
         PASS=0
         FAIL=0
 
@@ -970,11 +1051,14 @@ case "$COMMAND" in
             --command="
                 KEY=\$(cat ~/qwen-*/.api_key 2>/dev/null || cat ~/llama-docker/.api_key 2>/dev/null || echo '')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
-                echo \"\$KEY|\$PORT\"
+                NGROK_URL=\$(cat ~/.ngrok_url 2>/dev/null || echo '')
+                echo \"\$KEY|\$PORT|\$NGROK_URL\"
             " 2>/dev/null)
         API_KEY=$(echo "$CREDS" | cut -d'|' -f1)
         PORT=$(echo "$CREDS" | cut -d'|' -f2)
+        NGROK_URL=$(echo "$CREDS" | cut -d'|' -f3)
         BASE="http://$IP:$PORT"
+        [ -n "$NGROK_URL" ] && BASE="$NGROK_URL"
 
         PROPS=$(curl -s --max-time 10 \
             -H "Authorization: Bearer $API_KEY" \

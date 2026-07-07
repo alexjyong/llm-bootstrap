@@ -93,6 +93,8 @@ KV_CACHE_PRESET=""
 CONTEXT_TARGET=""
 ENABLE_MTP=false
 IDENTIFIER=""
+ENABLE_NGROK=false
+API_KEY_ARG=""
 
 show_usage() {
     cat << 'EOF'
@@ -114,6 +116,9 @@ Options:
   --thinking                  Enable thinking mode (default: disabled)
   --mtp                        Enable Multi-Token Prediction (27B only, ~2x faster generation)
   --identifier <name>          Custom model ID for API requests (default: model name)
+  --ngrok                      Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
+  --api-key <key>              Use this API key instead of generating a random one
+                                (also reads LLM_API_KEY from the environment)
 
 Models:
   1  Qwen 3.6-27B        27B params, all active. Best quality per token.
@@ -187,6 +192,14 @@ while [[ $# -gt 0 ]]; do
             IDENTIFIER="$2"
             shift 2
             ;;
+        --ngrok)
+            ENABLE_NGROK=true
+            shift
+            ;;
+        --api-key)
+            API_KEY_ARG="$2"
+            shift 2
+            ;;
         --help|-h)
             show_usage
             exit 0
@@ -211,6 +224,13 @@ if [ "$START_ONLY" = "true" ]; then
     echo "Starting $SERVICE_NAME.service..."
     sudo systemctl start "$SERVICE_NAME.service"
     echo "Service started."
+
+    if [ "$ENABLE_NGROK" = "true" ]; then
+        echo ""
+        source "$HOME/ngrok.sh"
+        ngrok_setup_if_enabled "true" "$PORT" "$AUTO_YES" || true
+    fi
+
     echo ""
     echo "Check status:  sudo systemctl status $SERVICE_NAME.service"
     echo "View logs:     sudo journalctl -u $SERVICE_NAME.service -f"
@@ -675,7 +695,12 @@ fi
 echo "[5/7] Generating API key..."
 
 API_KEY_FILE="$WORK_DIR/.api_key"
-if [ -f "$API_KEY_FILE" ]; then
+CUSTOM_API_KEY="${API_KEY_ARG:-${LLM_API_KEY:-}}"
+if [ -n "$CUSTOM_API_KEY" ]; then
+    echo "$CUSTOM_API_KEY" > "$API_KEY_FILE"
+    chmod 600 "$API_KEY_FILE"
+    echo "  Using provided API key."
+elif [ -f "$API_KEY_FILE" ]; then
     echo "  API key already exists."
 else
     openssl rand -hex 32 > "$API_KEY_FILE"
@@ -763,6 +788,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable $SERVICE_NAME.service
 
 echo "  Service created: $SERVICE_NAME.service"
+
+if [ "$ENABLE_NGROK" = "true" ]; then
+    echo ""
+    source "$HOME/ngrok.sh"
+    ngrok_setup_if_enabled "true" "$PORT" "$AUTO_YES" || true
+fi
 
 # ===================================================================
 # [7/7] Create test script
@@ -893,11 +924,16 @@ echo ""
 echo "  5. Get your API key:"
 echo "     cat $API_KEY_FILE"
 echo ""
-echo "  Configure GCP firewall to allow port $PORT:"
-echo "     gcloud compute firewall-rules create allow-llamacpp \\"
-echo "       --allow=tcp:$PORT \\"
-echo "       --source-ranges=YOUR_IP/32"
-echo ""
+if [ -f "$HOME/.ngrok_url" ]; then
+    echo "  ngrok URL: $(cat "$HOME/.ngrok_url")"
+    echo ""
+else
+    echo "  Configure GCP firewall to allow port $PORT:"
+    echo "     gcloud compute firewall-rules create allow-llamacpp \\"
+    echo "       --allow=tcp:$PORT \\"
+    echo "       --source-ranges=YOUR_IP/32"
+    echo ""
+fi
 echo "  Restart after VM reboot:"
 echo "     ./setup_llamacpp.sh --start-only"
 echo ""
