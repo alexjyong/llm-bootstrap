@@ -680,6 +680,7 @@ parse_vllm_args() {
     DEPLOY_MODE="native"
     ENABLE_NGROK=false
     API_KEY_ARG=""
+    ENABLE_FIXED_TEMPLATE=false
 
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -693,6 +694,7 @@ parse_vllm_args() {
             --port) PORT="$2"; shift 2 ;;
             --ngrok) ENABLE_NGROK=true; shift ;;
             --api-key) API_KEY_ARG="$2"; shift 2 ;;
+            --fixed-chat-template) ENABLE_FIXED_TEMPLATE=true; shift ;;
             --help|-h) show_vllm_usage; exit 0 ;;
             *) echo "Unknown option: $1"; show_vllm_usage; exit 1 ;;
         esac
@@ -717,6 +719,8 @@ Options:
   --ngrok                        Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
   --api-key <key>                Use this API key instead of generating a random one
                                   (also reads LLM_API_KEY from the environment)
+  --fixed-chat-template           Use froggeric's community chat template fix (Qwen only)
+                                  https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
 
 Quantization options:
   NVFP4  NVIDIA FP4, ~14GB — fits on 1x L4 (24GB), best for multi-user
@@ -855,6 +859,23 @@ assemble_extra_flags() {
     # Larger batch budget improves throughput for code/agentic workloads
     if [ "$TENSOR_PARALLEL" -gt 1 ] 2>/dev/null; then
         EXTRA_FLAGS="$EXTRA_FLAGS --max-num-batched-tokens 8192"
+    fi
+
+    if [ "$ENABLE_FIXED_TEMPLATE" = "true" ]; then
+        source "$HOME/chat_templates.sh"
+        if [ "$DEPLOY_MODE" = "docker" ]; then
+            # Mounted at /templates by docker-compose.yml (TEMPLATES_DIR defaults to ./templates,
+            # which resolves to $WORK_DIR/templates since compose runs from $WORK_DIR).
+            mkdir -p "$WORK_DIR/templates"
+            if download_fixed_chat_template "$WORK_DIR/templates/chat_template.jinja"; then
+                EXTRA_FLAGS="$EXTRA_FLAGS --chat-template /templates/chat_template.jinja"
+            fi
+        else
+            mkdir -p "$WORK_DIR"
+            if download_fixed_chat_template "$WORK_DIR/chat_template.jinja"; then
+                EXTRA_FLAGS="$EXTRA_FLAGS --chat-template $WORK_DIR/chat_template.jinja"
+            fi
+        fi
     fi
 
     EXTRA_FLAGS="$EXTRA_FLAGS --default-chat-template-kwargs '{\"enable_thinking\":false}'"

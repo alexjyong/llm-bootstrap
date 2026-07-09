@@ -138,6 +138,7 @@ print_docker_completion() {
     echo ""
     echo "  Model:    $MODEL_DISPLAY"
     echo "  MTP:      $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+    echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
     echo "  API:      http://$external_ip:$PORT/v1/"
     if [ -f "$HOME/.ngrok_url" ]; then
         echo "  ngrok:    $(cat "$HOME/.ngrok_url")/v1/"
@@ -232,6 +233,7 @@ print_native_completion() {
     echo ""
     echo "  Model:     $MODEL_DISPLAY"
     echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+    echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
     echo "  Service:   $SERVICE_NAME"
     echo "  Directory: $WORK_DIR"
     echo "  API key:   $WORK_DIR/.api_key"

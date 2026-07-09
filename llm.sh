@@ -32,6 +32,8 @@ Deploy:
                                    (needs NGROK_AUTHTOKEN env var, or you'll be prompted)
     --api-key <key>               Use this API key instead of generating a random one
                                    (also reads LLM_API_KEY from the environment)
+    --fixed-chat-template         Use froggeric's community chat template fix (Qwen models only)
+                                   https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
     All other flags (--model, --quant, --port, --context-length, --start-only, etc.)
     are passed through to the setup script.
 
@@ -69,6 +71,7 @@ Examples:
   ./llm.sh deploy my-llm --backend llamacpp --quant Q6_K --yes # non-interactive
   ./llm.sh deploy my-llm --backend llamacpp --ngrok --yes      # expose via ngrok tunnel
   ./llm.sh deploy my-llm --backend llamacpp --api-key sk-my-key --yes # custom API key
+  ./llm.sh deploy my-llm --backend vllm --fixed-chat-template --yes  # community chat template fix
   ./llm.sh list
   ./llm.sh creds my-llm
   ./llm.sh config my-llm context-length 262144
@@ -300,6 +303,29 @@ pick_model() {
     done
 }
 
+pick_fixed_template() {
+    local has_flag=false
+    for flag in "${SETUP_FLAGS[@]}"; do
+        [ "$flag" = "--fixed-chat-template" ] && has_flag=true
+    done
+    if [ "$has_flag" = "true" ]; then return; fi
+
+    # Model 4 (llamacpp/llamacpp-docker) is Gemma — the template only applies to Qwen.
+    if { [ "$BACKEND" = "llamacpp" ] || [ "$BACKEND" = "llamacpp-docker" ]; } && [ "$SELECTED_MODEL" = "4" ]; then
+        return
+    fi
+
+    echo ""
+    echo "Use froggeric's community chat template fix for Qwen 3.5/3.6?"
+    echo "  Fixes agentic tool-calling loops, KV cache invalidation, and other issues"
+    echo "  in the official template: https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates"
+    read -p "  Use fixed chat template? (y/n): " -n 1 -r
+    echo
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        SETUP_FLAGS+=("--fixed-chat-template")
+    fi
+}
+
 pick_mtp() {
     local has_mtp=false
     for flag in "${SETUP_FLAGS[@]}"; do
@@ -480,7 +506,7 @@ do_deploy() {
             --api-key) LLM_API_KEY="$2"; shift 2 ;;
             --model|--quant|--port|--context-length|--parallel|--identifier)
                 SETUP_FLAGS+=("$1" "$2"); shift 2 ;;
-            --enable-tool-calling|--tool-calling|--start-only|--mtp|--ngrok)
+            --enable-tool-calling|--tool-calling|--start-only|--mtp|--ngrok|--fixed-chat-template)
                 SETUP_FLAGS+=("$1"); shift ;;
             -*) SETUP_FLAGS+=("$1"); shift ;;
             *)
@@ -495,6 +521,7 @@ do_deploy() {
     if [ -z "$BACKEND" ]; then
         pick_backend
         pick_model
+        pick_fixed_template
         pick_mtp
         pick_quant
         pick_parallel
@@ -572,6 +599,7 @@ do_deploy() {
     echo "Uploading scripts..."
 
     scp_to_vm "$VM_NAME" "$VM_ZONE" "$SCRIPT_DIR/ngrok.sh"
+    scp_to_vm "$VM_NAME" "$VM_ZONE" "$SCRIPT_DIR/chat_templates.sh"
 
     case "$BACKEND" in
         llamacpp)

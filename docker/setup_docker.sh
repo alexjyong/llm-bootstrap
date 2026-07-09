@@ -57,6 +57,7 @@ ENABLE_MTP=false
 IDENTIFIER=""
 ENABLE_NGROK=false
 API_KEY_ARG=""
+ENABLE_FIXED_TEMPLATE=false
 
 show_usage() {
     cat << 'EOF'
@@ -80,6 +81,8 @@ Options:
   --ngrok                     Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
   --api-key <key>             Use this API key instead of generating a random one
                               (also reads LLM_API_KEY from the environment)
+  --fixed-chat-template       Use froggeric's community chat template fix (Qwen models only)
+                              https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
 
 EOF
 }
@@ -99,6 +102,7 @@ while [[ $# -gt 0 ]]; do
         --identifier) IDENTIFIER="$2"; shift 2 ;;
         --ngrok) ENABLE_NGROK=true; shift ;;
         --api-key) API_KEY_ARG="$2"; shift 2 ;;
+        --fixed-chat-template) ENABLE_FIXED_TEMPLATE=true; shift ;;
         --help|-h) show_usage; exit 0 ;;
         *) echo "Unknown option: $1"; show_usage; exit 1 ;;
     esac
@@ -165,6 +169,11 @@ FILE_PATTERN="${MODEL_FILE_PATTERNS[$MODEL_IDX]}"
 MMPROJ_FILE="${MODEL_MMPROJ_FILES[$MODEL_IDX]}"
 MODEL_ALIAS="${MODEL_ALIASES[$MODEL_IDX]}"
 [ -n "$IDENTIFIER" ] && MODEL_ALIAS="$IDENTIFIER"
+
+if [ "$ENABLE_FIXED_TEMPLATE" = "true" ] && [ "$MODEL_IDX" = "2" ]; then
+    echo "ERROR: --fixed-chat-template only supports Qwen models (1, 2), not Gemma (3)."
+    exit 1
+fi
 
 # ===================================================================
 # MTP prompt (only for Qwen 3.6-27B)
@@ -323,6 +332,13 @@ fi
 if [ "$ENABLE_MTP" = "true" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --spec-type draft-mtp --spec-draft-n-max 3"
 fi
+if [ "$ENABLE_FIXED_TEMPLATE" = "true" ]; then
+    mkdir -p "$WORK_DIR/models"
+    source "$HOME/chat_templates.sh"
+    if download_fixed_chat_template "$WORK_DIR/models/chat_template.jinja"; then
+        EXTRA_FLAGS="$EXTRA_FLAGS --chat-template-file /models/chat_template.jinja"
+    fi
+fi
 
 YARN_DISPLAY="off"
 [ "$USE_YARN" = "true" ] && YARN_DISPLAY="ENABLED (target: $CONTEXT_TARGET)"
@@ -342,6 +358,7 @@ echo "  Parallel:  $PARALLEL slots"
 echo "  Port:      $PORT"
 echo "  Image:     $DOCKER_IMAGE"
 echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
+echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo ""
 
 if [ "$AUTO_YES" = "false" ]; then
@@ -610,6 +627,7 @@ echo "════════════════════════�
 echo ""
 echo "  Model:    ${MODEL_NAMES[$MODEL_IDX]} ($QUANT)"
 echo "  MTP:      $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo "  API:      http://$EXTERNAL_IP:$PORT/v1/"
 if [ -f "$HOME/.ngrok_url" ]; then
     echo "  ngrok:    $(cat "$HOME/.ngrok_url")/v1/"

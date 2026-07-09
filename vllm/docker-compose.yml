@@ -6,6 +6,7 @@ services:
     volumes:
       - ${HF_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface
       - vllm-compile-cache:/root/.cache/vllm
+      - ${TEMPLATES_DIR:-./templates}:/templates
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     deploy:

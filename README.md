@@ -174,6 +174,17 @@ export LLM_API_KEY="sk-my-fixed-key"
 # or: ./llm.sh deploy VM_NAME --backend llamacpp --api-key sk-my-fixed-key --yes
 ```
 
+### Fixed chat template for Qwen 3.5/3.6
+
+Pass `--fixed-chat-template` (or answer the wizard prompt) to use [froggeric/Qwen-Fixed-Chat-Templates](https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates) instead of the model's default chat template. It's a community rewrite that claims to fix agentic tool-calling loops, KV-cache invalidation between turns, and llama.cpp/minijinja incompatibilities in Alibaba's official template:
+
+```bash
+./llm.sh deploy VM_NAME --backend llamacpp --model 1 --fixed-chat-template --yes
+./llm.sh deploy VM_NAME --backend vllm --fixed-chat-template --yes
+```
+
+This is opt-in and only applies to Qwen models (it's rejected for the Gemma option on the llama.cpp backends). The template is downloaded from a pinned commit, not `main`, so a running deploy won't change behavior if the upstream repo is edited later — these are third-party, unverified claims, so treat it as experimental.
+
 ### Other
 
 - **Manual GCP setup** (raw gcloud commands, quota checking): [docs/gcp-manual.md](docs/gcp-manual.md)

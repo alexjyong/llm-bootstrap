@@ -95,6 +95,7 @@ ENABLE_MTP=false
 IDENTIFIER=""
 ENABLE_NGROK=false
 API_KEY_ARG=""
+ENABLE_FIXED_TEMPLATE=false
 
 show_usage() {
     cat << 'EOF'
@@ -119,6 +120,8 @@ Options:
   --ngrok                      Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
   --api-key <key>              Use this API key instead of generating a random one
                                 (also reads LLM_API_KEY from the environment)
+  --fixed-chat-template        Use froggeric's community chat template fix (Qwen models only)
+                                https://huggingface.co/froggeric/Qwen-Fixed-Chat-Templates
 
 Models:
   1  Qwen 3.6-27B        27B params, all active. Best quality per token.
@@ -199,6 +202,10 @@ while [[ $# -gt 0 ]]; do
         --api-key)
             API_KEY_ARG="$2"
             shift 2
+            ;;
+        --fixed-chat-template)
+            ENABLE_FIXED_TEMPLATE=true
+            shift
             ;;
         --help|-h)
             show_usage
@@ -290,6 +297,11 @@ MODEL_ALIAS="${MODEL_ALIASES[$MODEL_IDX]}"
 [ -n "$IDENTIFIER" ] && MODEL_ALIAS="$IDENTIFIER"
 MMPROJ_FILE="${MODEL_MMPROJ_FILES[$MODEL_IDX]}"
 WORK_DIR="$HOME/$DIR_NAME"
+
+if [ "$ENABLE_FIXED_TEMPLATE" = "true" ] && [ "$MODEL_IDX" = "3" ]; then
+    echo "ERROR: --fixed-chat-template only supports Qwen models (1, 2, 3), not Gemma (4)."
+    exit 1
+fi
 
 # ===================================================================
 # MTP prompt (only for Qwen 3.6-27B)
@@ -481,6 +493,7 @@ echo "  Parallel:    $PARALLEL slots"
 echo "  Port:        $PORT"
 echo "  Thinking:    $([ "$ENABLE_THINKING" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  MTP:         $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
+echo "  Chat tmpl:   $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo "  Directory:   $WORK_DIR"
 echo ""
 
@@ -746,6 +759,14 @@ if [ "$ENABLE_MTP" = "true" ]; then
     MTP_FLAGS="--spec-type draft-mtp --spec-draft-n-max 3"
 fi
 
+CHAT_TEMPLATE_FLAG=""
+if [ "$ENABLE_FIXED_TEMPLATE" = "true" ]; then
+    source "$HOME/chat_templates.sh"
+    if download_fixed_chat_template "$WORK_DIR/chat_template.jinja"; then
+        CHAT_TEMPLATE_FLAG="--chat-template-file $WORK_DIR/chat_template.jinja"
+    fi
+fi
+
 SERVICE_NAME="llamacpp"
 
 sudo tee /etc/systemd/system/$SERVICE_NAME.service > /dev/null << EOF
@@ -772,6 +793,7 @@ ExecStart=$WORK_DIR/bin/llama-server \\
     --alias $MODEL_ALIAS \\
     $MMPROJ_FLAG \\
     --jinja \\
+    $CHAT_TEMPLATE_FLAG \\
     $THINKING_FLAG \\
     $MTP_FLAGS \\
     --metrics
@@ -906,6 +928,7 @@ echo "  Directory: $WORK_DIR"
 echo "  API key:   $API_KEY_FILE"
 echo "  Thinking:  $([ "$ENABLE_THINKING" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo ""
 echo "  Next steps:"
 echo ""
