@@ -54,6 +54,8 @@ Practical impact on an A100 80GB running Qwen 3.6-27B Q6_K (~23 GB model):
 
 For most workloads (chat, code review, PR agent), `q8_0` is the right default. Switch to `mixed` or `q4_0` when you need to fit more context or more parallel slots on the same GPU.
 
+**With `--dflash`** (see [llamacpp.md](llamacpp.md#dflash-speculative-decoding)), the KV cache preset above is overridden to f16 (~60 bytes/token, double the `q8_0` default) regardless of what's requested, and the self-converted bf16 draft model itself uses ~4GB of VRAM on top of the target. Both are subtracted from the auto-sizing budget automatically, but expect meaningfully less max context than the table above for the same GPU.
+
 ### YaRN context extension
 
 Qwen 3.6 27B has a 262K native context window. YaRN (Yet another RoPE extensioN) scales this up to ~1M tokens by modifying the positional encoding at inference time. Both setup scripts support `--context-target <target>`:

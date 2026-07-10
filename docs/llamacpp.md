@@ -51,6 +51,26 @@ To enable thinking:
 
 This is handled natively by `llama-server` via `--chat-template-kwargs '{"enable_thinking":false}'`.
 
+## DFlash Speculative Decoding
+
+DFlash pairs a small draft model with the target model to draft multiple tokens per forward pass — roughly **3.75x faster generation** than plain inference on Qwen 3.6-27B, ahead of `--mtp`'s ~2x. Enable with:
+
+```bash
+./setup_llamacpp.sh --model 1 --quant Q6_K --dflash --yes
+```
+
+Mutually exclusive with `--mtp` (both are speculative-decoding modes; pick one).
+
+**The draft model is self-converted, not downloaded pre-built.** Every pre-built DFlash GGUF found on Hugging Face is a third-party conversion of [z-lab/Qwen3.6-27B-DFlash](https://huggingface.co/z-lab/Qwen3.6-27B-DFlash) (the original MIT-licensed release) — several popular ones predate llama.cpp's architecture rename and fail to load. Instead, `--dflash` downloads the primary-source safetensors plus just the target's tokenizer files, then converts locally via llama.cpp's own `convert_hf_to_gguf.py`. This happens once (cached in the model directory) and adds a few minutes to first-time setup, plus a one-time install of llama.cpp's Python conversion dependencies (`torch`, `transformers`, etc. — CPU-only, not the CUDA build).
+
+Caveats, in order of how confident the underlying research is:
+
+- **Forces f16 KV cache**, overriding whatever `--kv-cache` preset you picked. Quantized KV cache (q8_0/mixed/q4_0) measured a 7x slowdown in draft verification speed in third-party testing. This costs roughly double the VRAM per token, so auto-sized context will come out smaller than without `--dflash`.
+- **Only validated single-GPU.** No source found tested `--tensor-split` multi-GPU with DFlash — it's not blocked, but expect the unexpected on the `l4` (2x L4) preset.
+- Restricted to Qwen 3.6-27B (model 1) — no DFlash draft exists for the other models in this repo's registry.
+
+See `docs/dflash-research.md` for the full research behind these decisions.
+
 ## Managing the Service
 
 ```bash

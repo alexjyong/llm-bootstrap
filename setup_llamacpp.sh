@@ -92,10 +92,15 @@ ENABLE_THINKING=false
 KV_CACHE_PRESET=""
 CONTEXT_TARGET=""
 ENABLE_MTP=false
+ENABLE_DFLASH=false
 IDENTIFIER=""
 ENABLE_NGROK=false
 API_KEY_ARG=""
 ENABLE_FIXED_TEMPLATE=false
+
+# DFlash draft model source (self-converted from the primary source, not a
+# third-party GGUF — see docs/dflash-research.md). Tune here, not via a flag.
+DFLASH_SPEC_DRAFT_N_MAX=12
 
 show_usage() {
     cat << 'EOF'
@@ -116,6 +121,9 @@ Options:
   --parallel <N>              Concurrent request slots (default: 4)
   --thinking                  Enable thinking mode (default: disabled)
   --mtp                        Enable Multi-Token Prediction (27B only, ~2x faster generation)
+  --dflash                      Enable DFlash speculative decoding (27B only, ~3.75x faster generation)
+                                Self-converts a draft model from the primary source on first run
+                                (one-time, adds a few minutes). Mutually exclusive with --mtp.
   --identifier <name>          Custom model ID for API requests (default: model name)
   --ngrok                      Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
   --api-key <key>              Use this API key instead of generating a random one
@@ -141,6 +149,7 @@ Examples:
   ./setup_llamacpp.sh --thinking                     # enable thinking mode
   ./setup_llamacpp.sh --kv-cache mixed --context-target 512k --yes  # extended context
   ./setup_llamacpp.sh --model 1 --mtp --yes                        # MTP speculative decoding
+  ./setup_llamacpp.sh --model 1 --dflash --yes                      # DFlash speculative decoding
 
 EOF
 }
@@ -189,6 +198,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mtp)
             ENABLE_MTP=true
+            shift
+            ;;
+        --dflash)
+            ENABLE_DFLASH=true
             shift
             ;;
         --identifier)
@@ -349,6 +362,19 @@ if [ "$ENABLE_MTP" = "true" ]; then
 fi
 
 # ===================================================================
+# DFlash restrictions (only for Qwen 3.6-27B, mutually exclusive with MTP)
+# ===================================================================
+if [ "$ENABLE_DFLASH" = "true" ] && [ "$MODEL_IDX" != "0" ]; then
+    echo "ERROR: DFlash is only supported for Qwen 3.6-27B (model 1)."
+    exit 1
+fi
+
+if [ "$ENABLE_DFLASH" = "true" ] && [ "$ENABLE_MTP" = "true" ]; then
+    echo "ERROR: --mtp and --dflash are mutually exclusive (both are speculative-decoding modes)."
+    exit 1
+fi
+
+# ===================================================================
 # Resolve quant
 # ===================================================================
 if [ -z "$QUANT" ]; then
@@ -425,6 +451,20 @@ case "$KV_CACHE_PRESET" in
     *) echo "ERROR: Unknown KV cache preset '$KV_CACHE_PRESET'. Use: q8_0, mixed, q4_0"; exit 1 ;;
 esac
 
+# DFlash needs f16 KV cache — quantized (q8_0/mixed/q4_0) KV cache measured a
+# 7x slowdown in draft verification speed in third-party testing. This
+# overrides whatever --kv-cache preset was picked.
+if [ "$ENABLE_DFLASH" = "true" ]; then
+    if [ "$KV_CACHE_PRESET" != "q8_0" ]; then
+        echo "  NOTE: --dflash forces f16 KV cache (quantized KV cache causes a measured 7x"
+        echo "        slowdown in draft verification) — overriding --kv-cache $KV_CACHE_PRESET."
+    else
+        echo "  NOTE: --dflash forces f16 KV cache (quantized KV cache causes a measured 7x"
+        echo "        slowdown in draft verification) instead of the q8_0 default."
+    fi
+    CACHE_K="f16"; CACHE_V="f16"; BYTES_PER_TOKEN=60
+fi
+
 # ===================================================================
 # Resolve context target
 # ===================================================================
@@ -493,6 +533,7 @@ echo "  Parallel:    $PARALLEL slots"
 echo "  Port:        $PORT"
 echo "  Thinking:    $([ "$ENABLE_THINKING" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  MTP:         $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
+echo "  DFlash:      $([ "$ENABLE_DFLASH" = "true" ] && echo "ENABLED (spec-draft-n-max: $DFLASH_SPEC_DRAFT_N_MAX, self-converted draft)" || echo "disabled")"
 echo "  Chat tmpl:   $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo "  Directory:   $WORK_DIR"
 echo ""
@@ -546,6 +587,10 @@ if [ "$GPU_COUNT" -gt 1 ]; then
     SPLIT_VAL=$(python3 -c "print(','.join(['1'] * $GPU_COUNT))")
     TENSOR_SPLIT="--tensor-split $SPLIT_VAL"
     echo "  Multi-GPU: tensor split $SPLIT_VAL"
+    if [ "$ENABLE_DFLASH" = "true" ]; then
+        echo "  WARNING: DFlash + multi-GPU tensor-split has not been validated by any known"
+        echo "           source (every DFlash benchmark found was single-GPU). Proceeding anyway."
+    fi
 fi
 
 # Auto-size context window based on available VRAM
@@ -554,12 +599,19 @@ if [ "$CONTEXT_LENGTH" = "auto" ]; then
     MODEL_MB=$((MODEL_GB * 1024))
     AVAILABLE_MB=$((TOTAL_VRAM - MODEL_MB - 2048))
 
+    # DFlash draft model adds its own VRAM footprint (~2B params, bf16, no
+    # quantization — see dflash_convert.sh for why it stays unquantized).
+    if [ "$ENABLE_DFLASH" = "true" ]; then
+        AVAILABLE_MB=$((AVAILABLE_MB - 4096))
+    fi
+
     if [ "$AVAILABLE_MB" -le 0 ]; then
         echo "ERROR: Model ($VRAM_EST) is too large for ${TOTAL_VRAM} MiB VRAM."
         exit 1
     fi
 
-    # BYTES_PER_TOKEN set by KV cache preset: q8_0=30, mixed=22, q4_0=15
+    # BYTES_PER_TOKEN set by KV cache preset: q8_0=30, mixed=22, q4_0=15,
+    # forced to 60 (f16) above when --dflash is set.
     MAX_CTX=$(( (AVAILABLE_MB * 1024 * 1024) / BYTES_PER_TOKEN ))
 
     # Clamp to context target max and round down to nearest 4096
@@ -576,6 +628,10 @@ if [ "$CONTEXT_LENGTH" = "auto" ]; then
 
     CONTEXT_LENGTH=$MAX_CTX
     echo "  Context auto-sized: ${CONTEXT_LENGTH} tokens (${AVAILABLE_MB} MiB for KV cache, ${BYTES_PER_TOKEN} bytes/token)"
+    if [ "$ENABLE_DFLASH" = "true" ] && [ "$MAX_CTX" -gt 32768 ]; then
+        echo "  NOTE: DFlash at context above 32K tokens has not been validated by any known"
+        echo "        source — if the server is unstable, try lowering --context-length."
+    fi
 fi
 
 # ===================================================================
@@ -702,6 +758,18 @@ if [ -n "$MMPROJ_FILE" ]; then
     fi
 fi
 
+# Self-convert the DFlash draft model from the primary source (not a
+# third-party GGUF — see docs/dflash-research.md).
+DFLASH_MODEL_PATH=""
+if [ "$ENABLE_DFLASH" = "true" ]; then
+    DFLASH_MODEL_PATH="$WORK_DIR/models/qwen3.6-27b-dflash-bf16.gguf"
+    source "$HOME/dflash_convert.sh"
+    convert_dflash_draft "$LLAMA_SRC" "$DFLASH_MODEL_PATH" "$WORK_DIR/models/.dflash_marker" || {
+        echo "ERROR: DFlash draft conversion failed. Aborting."
+        exit 1
+    }
+fi
+
 # ===================================================================
 # [5/7] Generate API key
 # ===================================================================
@@ -759,6 +827,11 @@ if [ "$ENABLE_MTP" = "true" ]; then
     MTP_FLAGS="--spec-type draft-mtp --spec-draft-n-max 3"
 fi
 
+DFLASH_FLAGS=""
+if [ "$ENABLE_DFLASH" = "true" ]; then
+    DFLASH_FLAGS="-md $DFLASH_MODEL_PATH --spec-type draft-dflash --spec-draft-n-max $DFLASH_SPEC_DRAFT_N_MAX"
+fi
+
 CHAT_TEMPLATE_FLAG=""
 if [ "$ENABLE_FIXED_TEMPLATE" = "true" ]; then
     source "$HOME/chat_templates.sh"
@@ -796,6 +869,7 @@ ExecStart=$WORK_DIR/bin/llama-server \\
     $CHAT_TEMPLATE_FLAG \\
     $THINKING_FLAG \\
     $MTP_FLAGS \\
+    $DFLASH_FLAGS \\
     --metrics
 Restart=on-failure
 RestartSec=10
@@ -928,6 +1002,7 @@ echo "  Directory: $WORK_DIR"
 echo "  API key:   $API_KEY_FILE"
 echo "  Thinking:  $([ "$ENABLE_THINKING" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+echo "  DFlash:    $([ "$ENABLE_DFLASH" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo ""
 echo "  Next steps:"

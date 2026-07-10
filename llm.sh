@@ -326,16 +326,26 @@ pick_fixed_template() {
     fi
 }
 
-pick_mtp() {
-    local has_mtp=false
+pick_speculative_decoding() {
+    local has_mtp=false has_dflash=false
     for flag in "${SETUP_FLAGS[@]}"; do
         [ "$flag" = "--mtp" ] && has_mtp=true
+        [ "$flag" = "--dflash" ] && has_dflash=true
     done
-    if [ "$has_mtp" = "true" ]; then return; fi
+    if [ "$has_mtp" = "true" ] || [ "$has_dflash" = "true" ]; then return; fi
 
-    # For llama.cpp backends: only available for model 1 (27B)
-    # For vLLM: always available (only serves 27B)
-    if [ "$BACKEND" != "vllm" ] && [ "$BACKEND" != "vllm-docker" ] && [ "$SELECTED_MODEL" != "1" ]; then return; fi
+    # MTP: llama.cpp backends only for model 1 (27B); vLLM always (only serves 27B)
+    local mtp_available=false
+    if [ "$BACKEND" = "vllm" ] || [ "$BACKEND" = "vllm-docker" ] || [ "$SELECTED_MODEL" = "1" ]; then
+        mtp_available=true
+    fi
+    # DFlash: llama.cpp backends only, model 1 (27B) only
+    local dflash_available=false
+    if { [ "$BACKEND" = "llamacpp" ] || [ "$BACKEND" = "llamacpp-docker" ]; } && [ "$SELECTED_MODEL" = "1" ]; then
+        dflash_available=true
+    fi
+
+    if [ "$mtp_available" = "false" ] && [ "$dflash_available" = "false" ]; then return; fi
 
     local mtp_desc="~2x faster generation using built-in draft prediction heads"
     local mtp_warn=""
@@ -345,20 +355,31 @@ pick_mtp() {
     fi
 
     echo ""
-    echo "Enable Multi-Token Prediction (MTP)?"
-    echo "  $mtp_desc"
-    if [ -n "$mtp_warn" ]; then
-        echo ""
-        echo "$mtp_warn"
+    echo "Enable speculative decoding?"
+    echo ""
+    echo "  1) No"
+    local next=1 mtp_opt="" dflash_opt=""
+    if [ "$mtp_available" = "true" ]; then
+        next=$((next + 1))
+        mtp_opt=$next
+        echo "  $next) MTP     $mtp_desc"
+        if [ -n "$mtp_warn" ]; then
+            echo "$mtp_warn"
+        fi
+    fi
+    if [ "$dflash_available" = "true" ]; then
+        next=$((next + 1))
+        dflash_opt=$next
+        echo "  $next) DFlash   ~3.75x faster generation, self-converts a draft model on"
+        echo "              first run (one-time, adds a few minutes; converted from the"
+        echo "              primary source, not a third-party GGUF)"
     fi
     echo ""
-    echo "  1) No   (standard inference)"
-    echo "  2) Yes  (speculative decoding with MTP)"
-    echo ""
     while true; do
-        read -p "MTP [1-2] (Enter for default): " choice
+        read -p "Speculative decoding [1-$next] (Enter for default): " choice
         if [ -z "$choice" ] || [ "$choice" = "1" ]; then break; fi
-        if [ "$choice" = "2" ]; then SETUP_FLAGS+=("--mtp"); break; fi
+        if [ -n "$mtp_opt" ] && [ "$choice" = "$mtp_opt" ]; then SETUP_FLAGS+=("--mtp"); break; fi
+        if [ -n "$dflash_opt" ] && [ "$choice" = "$dflash_opt" ]; then SETUP_FLAGS+=("--dflash"); break; fi
         echo "  Invalid choice."
     done
 }
@@ -506,7 +527,7 @@ do_deploy() {
             --api-key) LLM_API_KEY="$2"; shift 2 ;;
             --model|--quant|--port|--context-length|--parallel|--identifier)
                 SETUP_FLAGS+=("$1" "$2"); shift 2 ;;
-            --enable-tool-calling|--tool-calling|--start-only|--mtp|--ngrok|--fixed-chat-template)
+            --enable-tool-calling|--tool-calling|--start-only|--mtp|--dflash|--ngrok|--fixed-chat-template)
                 SETUP_FLAGS+=("$1"); shift ;;
             -*) SETUP_FLAGS+=("$1"); shift ;;
             *)
@@ -522,7 +543,7 @@ do_deploy() {
         pick_backend
         pick_model
         pick_fixed_template
-        pick_mtp
+        pick_speculative_decoding
         pick_quant
         pick_parallel
         pick_tool_calling
@@ -600,6 +621,7 @@ do_deploy() {
 
     scp_to_vm "$VM_NAME" "$VM_ZONE" "$SCRIPT_DIR/ngrok.sh"
     scp_to_vm "$VM_NAME" "$VM_ZONE" "$SCRIPT_DIR/chat_templates.sh"
+    scp_to_vm "$VM_NAME" "$VM_ZONE" "$SCRIPT_DIR/dflash_convert.sh"
 
     case "$BACKEND" in
         llamacpp)

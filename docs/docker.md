@@ -49,6 +49,16 @@ cd ~/llama-docker
 docker compose up -d
 ```
 
+## DFlash Speculative Decoding
+
+Same feature and caveats as the source-build backend (see [llamacpp.md](llamacpp.md#dflash-speculative-decoding) — forces f16 KV cache, single-GPU only, Qwen 3.6-27B only). Enable with:
+
+```bash
+./setup_docker.sh --model 1 --quant Q6_K --dflash --yes
+```
+
+The draft model is self-converted from the primary source ([z-lab/Qwen3.6-27B-DFlash](https://huggingface.co/z-lab/Qwen3.6-27B-DFlash)), not downloaded pre-built — see `docs/dflash-research.md`. Since this backend runs from a prebuilt image rather than a local build, `--dflash` does a one-time, throwaway shallow clone of llama.cpp purely to get its conversion scripts (`convert_hf_to_gguf.py`) — the server itself still runs from the prebuilt `ghcr.io` image, this clone is never built or used for anything else. The converted draft GGUF lands in the same `models/` directory that's already bind-mounted into the container, so no `docker-compose.yml` changes are needed.
+
 ## Managing the Container
 
 ```bash

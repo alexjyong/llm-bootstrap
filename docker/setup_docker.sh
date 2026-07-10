@@ -54,10 +54,15 @@ PARALLEL=3
 KV_CACHE_PRESET=""
 CONTEXT_TARGET=""
 ENABLE_MTP=false
+ENABLE_DFLASH=false
 IDENTIFIER=""
 ENABLE_NGROK=false
 API_KEY_ARG=""
 ENABLE_FIXED_TEMPLATE=false
+
+# DFlash draft model source (self-converted from the primary source, not a
+# third-party GGUF — see docs/dflash-research.md). Tune here, not via a flag.
+DFLASH_SPEC_DRAFT_N_MAX=12
 
 show_usage() {
     cat << 'EOF'
@@ -77,6 +82,9 @@ Options:
   --context-length <N>        Exact context window in tokens (overrides --context-target)
   --parallel <N>              Concurrent slots (default: 3)
   --mtp                       Enable Multi-Token Prediction (27B only, ~2x faster generation)
+  --dflash                    Enable DFlash speculative decoding (27B only, ~3.75x faster generation)
+                              Self-converts a draft model from the primary source on first run
+                              (one-time, adds a few minutes). Mutually exclusive with --mtp.
   --identifier <name>         Custom model ID for API requests (default: model name)
   --ngrok                     Expose the server via an ngrok tunnel (needs NGROK_AUTHTOKEN)
   --api-key <key>             Use this API key instead of generating a random one
@@ -99,6 +107,7 @@ while [[ $# -gt 0 ]]; do
         --kv-cache) KV_CACHE_PRESET="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
         --context-target) CONTEXT_TARGET="$(echo "$2" | tr '[:upper:]' '[:lower:]')"; shift 2 ;;
         --mtp) ENABLE_MTP=true; shift ;;
+        --dflash) ENABLE_DFLASH=true; shift ;;
         --identifier) IDENTIFIER="$2"; shift 2 ;;
         --ngrok) ENABLE_NGROK=true; shift ;;
         --api-key) API_KEY_ARG="$2"; shift 2 ;;
@@ -134,12 +143,23 @@ fi
 # ===================================================================
 if [ -n "$MODEL_ARG" ]; then
     MODEL_IDX=-1
+    # Exact numeric match first, in its own pass — otherwise e.g. "--model 2"
+    # can wrongly fuzzy-match model 1's name ("Qwen 3.6-27B" contains a "2")
+    # before the loop ever reaches the real index-2 candidate.
     for i in "${!MODEL_NAMES[@]}"; do
-        if [ "$MODEL_ARG" = "$((i+1))" ] || [[ "${MODEL_NAMES[$i],,}" == *"${MODEL_ARG,,}"* ]]; then
+        if [ "$MODEL_ARG" = "$((i+1))" ]; then
             MODEL_IDX=$i
             break
         fi
     done
+    if [ "$MODEL_IDX" = "-1" ]; then
+        for i in "${!MODEL_NAMES[@]}"; do
+            if [[ "${MODEL_NAMES[$i],,}" == *"${MODEL_ARG,,}"* ]]; then
+                MODEL_IDX=$i
+                break
+            fi
+        done
+    fi
     if [ "$MODEL_IDX" = "-1" ]; then
         echo "ERROR: Unknown model '$MODEL_ARG'. Available:"
         for i in "${!MODEL_NAMES[@]}"; do echo "  $((i+1))) ${MODEL_NAMES[$i]}"; done
@@ -205,6 +225,19 @@ if [ "$ENABLE_MTP" = "true" ]; then
     MMPROJ_FILE=""
     QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0" "BF16")
     MODEL_DEFAULT_QUANTS[0]="Q6_K"
+fi
+
+# ===================================================================
+# DFlash restrictions (only for Qwen 3.6-27B, mutually exclusive with MTP)
+# ===================================================================
+if [ "$ENABLE_DFLASH" = "true" ] && [ "$MODEL_IDX" != "0" ]; then
+    echo "ERROR: DFlash is only supported for Qwen 3.6-27B (model 1)."
+    exit 1
+fi
+
+if [ "$ENABLE_DFLASH" = "true" ] && [ "$ENABLE_MTP" = "true" ]; then
+    echo "ERROR: --mtp and --dflash are mutually exclusive (both are speculative-decoding modes)."
+    exit 1
 fi
 
 # ===================================================================
@@ -277,6 +310,18 @@ case "$KV_CACHE_PRESET" in
     *) echo "ERROR: Unknown KV cache preset '$KV_CACHE_PRESET'. Use: q8_0, mixed, q4_0"; exit 1 ;;
 esac
 
+# DFlash needs f16 KV cache — quantized KV cache measured a 7x slowdown in
+# draft verification speed in third-party testing. This has no VRAM-aware
+# auto-sizing safety net in this script (context is a flat default/flag,
+# same as without DFlash) — forced f16 costs roughly double the VRAM per
+# token of the q8_0 default, so pass --context-length explicitly if it OOMs.
+if [ "$ENABLE_DFLASH" = "true" ]; then
+    echo "  NOTE: --dflash forces f16 KV cache (quantized KV cache causes a measured 7x"
+    echo "        slowdown in draft verification), costing ~2x the VRAM per token of"
+    echo "        $KV_CACHE_PRESET. Lower --context-length explicitly if the server OOMs."
+    CACHE_K="f16"; CACHE_V="f16"; BYTES_PER_TOKEN=60
+fi
+
 # ===================================================================
 # Resolve context target
 # ===================================================================
@@ -332,6 +377,10 @@ fi
 if [ "$ENABLE_MTP" = "true" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --spec-type draft-mtp --spec-draft-n-max 3"
 fi
+DFLASH_MODEL_FILE="qwen3.6-27b-dflash-bf16.gguf"
+if [ "$ENABLE_DFLASH" = "true" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS -md /models/$DFLASH_MODEL_FILE --spec-type draft-dflash --spec-draft-n-max $DFLASH_SPEC_DRAFT_N_MAX"
+fi
 if [ "$ENABLE_FIXED_TEMPLATE" = "true" ]; then
     mkdir -p "$WORK_DIR/models"
     source "$HOME/chat_templates.sh"
@@ -358,6 +407,7 @@ echo "  Parallel:  $PARALLEL slots"
 echo "  Port:      $PORT"
 echo "  Image:     $DOCKER_IMAGE"
 echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
+echo "  DFlash:    $([ "$ENABLE_DFLASH" = "true" ] && echo "ENABLED (spec-draft-n-max: $DFLASH_SPEC_DRAFT_N_MAX, self-converted draft)" || echo "disabled")"
 echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo ""
 
@@ -447,6 +497,23 @@ if [ -n "$MMPROJ_FILE" ] && [ ! -f "$WORK_DIR/models/$MMPROJ_FILE" ]; then
     $HF_CMD download "$HF_REPO" "$MMPROJ_FILE" --local-dir "$WORK_DIR/models" || true
 fi
 
+if [ "$ENABLE_DFLASH" = "true" ]; then
+    echo "  Setting up DFlash draft model (self-converted from the primary source)..."
+    DFLASH_CONVERT_SRC="$WORK_DIR/.dflash_convert_src"
+    if [ -d "$DFLASH_CONVERT_SRC" ]; then
+        echo "    llama.cpp conversion source already cloned."
+    else
+        echo "    Cloning llama.cpp (conversion scripts only, not built — the server itself"
+        echo "    runs from the prebuilt Docker image)..."
+        git clone --depth 1 https://github.com/ggml-org/llama.cpp.git "$DFLASH_CONVERT_SRC"
+    fi
+    source "$HOME/dflash_convert.sh"
+    convert_dflash_draft "$DFLASH_CONVERT_SRC" "$WORK_DIR/models/$DFLASH_MODEL_FILE" "$WORK_DIR/models/.dflash_marker" || {
+        echo "ERROR: DFlash draft conversion failed. Aborting."
+        exit 1
+    }
+fi
+
 echo "  Done."
 
 # ===================================================================
@@ -469,6 +536,23 @@ sudo docker pull "$DOCKER_IMAGE" 2>/dev/null || {
     echo "  Pull failed. Building locally (this takes ~15 min)..."
     sudo docker build -t "$DOCKER_IMAGE" "$(dirname "$0")"
 }
+
+# The pulled image can succeed but still predate llama.cpp's DFlash merge —
+# it's only rebuilt via a manual workflow_dispatch, not automatically, so it
+# can silently go stale. Check for real instead of assuming, and self-heal
+# by building locally from current master if it's missing.
+if [ "$ENABLE_DFLASH" = "true" ]; then
+    if ! sudo docker run --rm --gpus all "$DOCKER_IMAGE" --help 2>&1 | grep -q "draft-dflash"; then
+        echo "  WARNING: Pulled image predates llama.cpp's DFlash support (it's only"
+        echo "  rebuilt on-demand, not automatically). Rebuilding locally from current"
+        echo "  master (this takes ~15 min)..."
+        sudo docker build -t "$DOCKER_IMAGE" "$(dirname "$0")"
+        if ! sudo docker run --rm --gpus all "$DOCKER_IMAGE" --help 2>&1 | grep -q "draft-dflash"; then
+            echo "ERROR: Rebuilt image still doesn't support --spec-type draft-dflash. Aborting."
+            exit 1
+        fi
+    fi
+fi
 
 API_KEY_FILE="$WORK_DIR/.api_key"
 CUSTOM_API_KEY="${API_KEY_ARG:-${LLM_API_KEY:-}}"
@@ -627,6 +711,7 @@ echo "════════════════════════�
 echo ""
 echo "  Model:    ${MODEL_NAMES[$MODEL_IDX]} ($QUANT)"
 echo "  MTP:      $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED" || echo "disabled")"
+echo "  DFlash:   $([ "$ENABLE_DFLASH" = "true" ] && echo "ENABLED" || echo "disabled")"
 echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
 echo "  API:      http://$EXTERNAL_IP:$PORT/v1/"
 if [ -f "$HOME/.ngrok_url" ]; then

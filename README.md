@@ -185,6 +185,16 @@ Pass `--fixed-chat-template` (or answer the wizard prompt) to use [froggeric/Qwe
 
 This is opt-in and only applies to Qwen models (it's rejected for the Gemma option on the llama.cpp backends). The template is downloaded from a pinned commit, not `main`, so a running deploy won't change behavior if the upstream repo is edited later — these are third-party, unverified claims, so treat it as experimental.
 
+### DFlash speculative decoding
+
+Pass `--dflash` (llama.cpp backends only, model 1) for speculative decoding — roughly 3.75x faster generation than plain inference:
+
+```bash
+./llm.sh deploy VM_NAME --backend llamacpp --model 1 --dflash --yes
+```
+
+The draft model is self-converted from the primary source ([z-lab/Qwen3.6-27B-DFlash](https://huggingface.co/z-lab/Qwen3.6-27B-DFlash)) on first run rather than downloaded pre-built — every pre-built DFlash GGUF found on Hugging Face turned out to be an unofficial third-party conversion, and several popular ones silently fail to load. Mutually exclusive with `--mtp`. See [docs/llamacpp.md](docs/llamacpp.md#dflash-speculative-decoding) for caveats (forces f16 KV cache, single-GPU only) and [docs/dflash-research.md](docs/dflash-research.md) for the full research behind these tradeoffs.
+
 ### Other
 
 - **Manual GCP setup** (raw gcloud commands, quota checking): [docs/gcp-manual.md](docs/gcp-manual.md)
