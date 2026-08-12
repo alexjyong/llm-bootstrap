@@ -39,11 +39,18 @@ GPU presets:
   a100      1x A100 (40GB) — a2-highgpu-1g
   a100-80   1x A100 (80GB) — a2-ultragpu-1g
   a100x2    2x A100 (80GB) — a2-highgpu-2g
+  g4        1x RTX PRO 6000 Blackwell (96GB) — g4-standard-48
+            Only preset with real NVFP4 W4A4 speedup (needs Blackwell
+            tensor cores; requires G4/RTX PRO 6000 GPU quota — request
+            it in the GCP Console before use)
+  g4-mini   1/4 RTX PRO 6000 Blackwell (24GB, MIG) — g4-standard-12
+            Cheap smoke test for G4 quota/availability
 
 Examples:
   ./create_gpu_vm.sh                              # 2x L4, loop all zones
   ./create_gpu_vm.sh --gpu a100                   # 1x A100
   ./create_gpu_vm.sh --gpu a100x2                 # 2x A100
+  ./create_gpu_vm.sh --gpu g4                     # 1x RTX PRO 6000 Blackwell (NVFP4 speedup)
   ./create_gpu_vm.sh --spot                       # 2x L4, spot pricing
   ./create_gpu_vm.sh --zone us-east1-b            # try specific zone first
   ./create_gpu_vm.sh --gpu a100 --name dev --spot # A100 spot, custom name
@@ -115,14 +122,22 @@ if [ -z "$GPU_PRESET" ]; then
     echo "  4) 2x A100 (80GB) — a2-highgpu-2g"
     echo "     Full precision or very large models. vLLM multi-user serving."
     echo ""
+    echo "  5) 1x RTX PRO 6000 Blackwell (96GB) — g4-standard-48"
+    echo "     Real NVFP4 W4A4 speedup (~2.5x). Needs G4 GPU quota."
+    echo ""
+    echo "  6) 1/4 RTX PRO 6000 Blackwell (24GB, MIG) — g4-standard-12"
+    echo "     Cheap smoke test for G4 quota/availability before committing to (5)."
+    echo ""
     while true; do
-        read -p "GPU preset [1-4] (Enter for default): " choice
+        read -p "GPU preset [1-6] (Enter for default): " choice
         case "$choice" in
             ""|1) GPU_PRESET="l4"; break ;;
             2) GPU_PRESET="a100"; break ;;
             3) GPU_PRESET="a100-80"; break ;;
             4) GPU_PRESET="a100x2"; break ;;
-            *) echo "  Invalid choice. Enter 1-4 or press Enter for default." ;;
+            5) GPU_PRESET="g4"; break ;;
+            6) GPU_PRESET="g4-mini"; break ;;
+            *) echo "  Invalid choice. Enter 1-6 or press Enter for default." ;;
         esac
     done
 
@@ -172,30 +187,65 @@ case "$GPU_PRESET" in
         GPU_COUNT=2
         GPU_LABEL="2x A100 (80GB)"
         ;;
+    g4)
+        MACHINE_TYPE="g4-standard-48"
+        GPU_TYPE="nvidia-rtx-pro-6000"
+        GPU_COUNT=1
+        GPU_LABEL="1x RTX PRO 6000 Blackwell (96GB)"
+        ;;
+    g4-mini)
+        MACHINE_TYPE="g4-standard-12"
+        GPU_TYPE="nvidia-rtx-pro-6000"
+        GPU_COUNT=1
+        GPU_LABEL="1/4 RTX PRO 6000 Blackwell (24GB, MIG)"
+        ;;
     *)
         echo "ERROR: Unknown GPU preset '${GPU_PRESET}'"
-        echo "Available: l4, a100, a100-80, a100x2"
+        echo "Available: l4, a100, a100-80, a100x2, g4, g4-mini"
         exit 1
         ;;
 esac
 
+# G4 machine types only support Hyperdisk, not standard Persistent Disk.
+DISK_TYPE="pd-balanced"
+if [[ "$MACHINE_TYPE" == g4-* ]]; then
+    DISK_TYPE="hyperdisk-balanced"
+fi
+
 # ───────────────────────────────────────────────────────────
 # Find zones with the selected GPU
 # ───────────────────────────────────────────────────────────
-echo "Finding zones with ${GPU_TYPE} GPUs..."
-ALL_ZONES=$(gcloud compute accelerator-types list \
-    --project="$PROJECT" \
-    --filter="name:${GPU_TYPE}" \
-    --format="value(zone)" \
-    2>/dev/null | sort -u)
+if [[ "$MACHINE_TYPE" == g4-* ]]; then
+    # G4's fractional sizes (e.g. g4-standard-12) are offered in far fewer
+    # zones than the raw nvidia-rtx-pro-6000 chip is — accelerator-types list
+    # reflects chip availability, not which packaged machine shapes are
+    # orderable there, so filter on the machine type itself instead.
+    echo "Finding zones with ${MACHINE_TYPE}..."
+    ALL_ZONES=$(gcloud compute machine-types list \
+        --project="$PROJECT" \
+        --filter="name=${MACHINE_TYPE}" \
+        --format="value(zone)" \
+        2>/dev/null | sort -u)
+else
+    echo "Finding zones with ${GPU_TYPE} GPUs..."
+    ALL_ZONES=$(gcloud compute accelerator-types list \
+        --project="$PROJECT" \
+        --filter="name:${GPU_TYPE}" \
+        --format="value(zone)" \
+        2>/dev/null | sort -u)
+fi
 
 if [ -z "$ALL_ZONES" ]; then
-    echo "ERROR: No zones found with ${GPU_TYPE} GPUs in project ${PROJECT}"
+    echo "ERROR: No zones found with ${MACHINE_TYPE} in project ${PROJECT}"
     exit 1
 fi
 
 ZONE_COUNT=$(echo "$ALL_ZONES" | wc -l)
-echo "Found ${ZONE_COUNT} zones with ${GPU_TYPE}."
+if [[ "$MACHINE_TYPE" == g4-* ]]; then
+    echo "Found ${ZONE_COUNT} zones with ${MACHINE_TYPE}."
+else
+    echo "Found ${ZONE_COUNT} zones with ${GPU_TYPE}."
+fi
 
 # Order: user-specified zone first, then US zones, then everything else
 ORDERED_ZONES=""
@@ -216,7 +266,7 @@ echo "  Preset:    ${GPU_PRESET}"
 echo "  Machine:   ${MACHINE_TYPE} (${GPU_LABEL})"
 echo "  Pricing:   ${PROVISIONING}"
 echo "  Auto-stop: $([ -n "$AUTO_STOP" ] && echo "after ${AUTO_STOP}" || echo "disabled")"
-echo "  Disk:      ${DISK_SIZE}GB pd-balanced"
+echo "  Disk:      ${DISK_SIZE}GB ${DISK_TYPE}"
 echo ""
 
 # ───────────────────────────────────────────────────────────
@@ -253,7 +303,7 @@ for ZONE in $ORDERED_ZONES; do
         $AUTO_STOP_FLAGS \
         --scopes=https://www.googleapis.com/auth/devstorage.read_only,https://www.googleapis.com/auth/logging.write,https://www.googleapis.com/auth/monitoring.write \
         --accelerator="count=${GPU_COUNT},type=${GPU_TYPE}" \
-        --create-disk="auto-delete=yes,boot=yes,device-name=${VM_NAME},image=${IMAGE},mode=rw,size=${DISK_SIZE},type=pd-balanced" \
+        --create-disk="auto-delete=yes,boot=yes,device-name=${VM_NAME},image=${IMAGE},mode=rw,size=${DISK_SIZE},type=${DISK_TYPE}" \
         --no-shielded-secure-boot \
         --shielded-vtpm \
         --shielded-integrity-monitoring \

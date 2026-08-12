@@ -88,14 +88,19 @@ Docs: [llama.cpp](docs/llamacpp.md) | [Docker](docs/docker.md) | [vLLM](vllm/)
 | `a100` | a2-highgpu-1g | 1x A100 | 40GB | Fast inference, large context |
 | `a100-80` | a2-ultragpu-1g | 1x A100 | 80GB | MTP, large context + headroom |
 | `a100x2` | a2-highgpu-2g | 2x A100 | 80GB | Full precision, multi-user vLLM |
+| `g4` | g4-standard-48 | 1x RTX PRO 6000 Blackwell | 96GB | vLLM NVFP4 with real W4A4 speedup |
+| `g4-mini` | g4-standard-12 | 1/4 RTX PRO 6000 Blackwell (MIG) | ~24GB | Cheap smoke test for G4 quota |
 
 ```bash
 ./create_gpu_vm.sh                         # interactive picker
 ./create_gpu_vm.sh --gpu a100              # 1x A100 40GB
 ./create_gpu_vm.sh --gpu a100-80           # 1x A100 80GB
+./create_gpu_vm.sh --gpu g4                # 1x RTX PRO 6000 Blackwell (NVFP4 speedup)
 ./create_gpu_vm.sh --gpu a100 --static-ip  # permanent IP address
 ./create_gpu_vm.sh --gpu l4 --spot         # spot pricing (cheaper, can be preempted)
 ```
+
+`g4` may need a GPU quota request in the GCP Console first (`nvidia-rtx-pro-6000` is a newer SKU than L4/A100).
 
 VMs auto-stop after **4 hours** by default. Override with `--auto-stop 12h` or `--no-auto-stop`.
 
@@ -105,7 +110,8 @@ VMs auto-stop after **4 hours** by default. Override with `--auto-stop 12h` or `
 ./llm.sh list                  # list all VMs
 ./llm.sh creds VM_NAME        # IP, port, API key, model ID
 ./llm.sh test VM_NAME         # run health, auth, and inference tests
-./llm.sh logs VM_NAME         # server logs
+./llm.sh logs VM_NAME         # server logs (last 50 lines)
+./llm.sh logs VM_NAME -f      # keep streaming new log lines (like tail -f)
 ./llm.sh stop VM_NAME         # stop (keeps disk, stops billing)
 ./llm.sh resume VM_NAME       # start + restart service (auto-detects backend)
 ./llm.sh ssh VM_NAME          # SSH in

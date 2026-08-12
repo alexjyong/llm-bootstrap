@@ -25,11 +25,25 @@ API is at `http://YOUR_VM_IP:8000/v1` with Bearer token auth (built-in, no nginx
 
 | Quant | VRAM | GPU Config | Quality |
 |-------|------|-----------|---------|
-| NVFP4 | ~14GB | 1x L4 — g2-standard-12 | ~99% of BF16 |
+| NVFP4 | ~14GB | 1x RTX PRO 6000 Blackwell — g4-standard-48 (full ~2.5x W4A4 speedup) or 1x L4 — g2-standard-12 (VRAM-only, no speedup) | ~99% of BF16 |
 | **FP8** (default) | ~27GB | 2x L4 — g2-standard-24 | Near-lossless |
 | BF16 (full) | ~54GB | 1x A100 80GB — a2-ultragpu-1g | Baseline |
 
 **FP8** is the default — best quality-per-dollar on L4 hardware. Uses `--kv-cache-dtype fp8_e5m2` to halve KV cache memory, which is critical for fitting 64K context on 2x L4.
+
+**NVFP4's real speedup needs Blackwell.** NVFP4 uses W4A4 (4-bit weights *and*
+activations) on FP4 tensor cores, which only exist on Blackwell GPUs. On L4/A100
+it falls back to vLLM's Marlin dequant path — no speedup (possibly slower than
+FP8), and worse, there's an open vLLM bug
+([#34694](https://github.com/vllm-project/vllm/issues/34694)) where that exact
+fallback path produces garbled output on GPUs without native FP4 support
+(mostly reported on consumer Blackwell, not confirmed on Ampere, but not ruled
+out either). Use BF16 or FP8 on L4/A100. Use `./create_gpu_vm.sh --gpu g4` for
+a single RTX PRO 6000 Blackwell GPU (96GB, actually cheaper than the A100 80GB
+preset) to get NVFP4's real speedup safely — note this GPU type may need a
+quota request in the GCP Console first. `setup_vllm.sh` detects the GPU at
+deploy time and warns (with these specifics) if NVFP4 is selected on
+non-Blackwell hardware.
 
 ## CLI Flags
 

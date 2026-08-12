@@ -23,7 +23,7 @@ fi
 
 # Docker constants
 VLLM_IMAGE="vllm/vllm-openai"
-VLLM_VERSION="v0.21.0"
+VLLM_VERSION="v0.24.0"  # minimum for NVFP4/Blackwell kernels per Unsloth's docs
 
 # ===================================================================
 # Mode-specific functions: Docker
@@ -292,6 +292,7 @@ fi
 # Shared config resolution
 resolve_quant_selection
 set_derived_config
+check_nvfp4_gpu_support
 prompt_mtp
 assemble_extra_flags
 

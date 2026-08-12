@@ -185,6 +185,43 @@ check_gpu_memory() {
     fi
 }
 
+check_nvfp4_gpu_support() {
+    [ "$QUANT_KEY" = "NVFP4" ] || return 0
+
+    local cap
+    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -1)
+
+    # Blackwell = compute capability 10.0+ (sm100/sm120, has FP4 tensor cores).
+    # Ada Lovelace (L4) = 8.9, Ampere (A100) = 8.0 — neither has FP4 tensor cores.
+    # The regex guards against awk falling back to a string compare (which would
+    # treat garbage output as "greater than" 10.0) if nvidia-smi returns anything
+    # non-numeric.
+    if awk -v c="$cap" 'BEGIN{ if (c ~ /^[0-9]+(\.[0-9]+)?$/ && c+0 >= 10.0) exit 0; exit 1 }' 2>/dev/null; then
+        print_success "Blackwell GPU detected (compute capability $cap) — full W4A4 speedup available"
+        return 0
+    fi
+
+    print_warning "This GPU (compute capability ${cap:-unknown}) has no FP4 tensor cores."
+    print_warning "NVFP4 falls back to vLLM's Marlin dequant path here — no speedup over FP8,"
+    print_warning "likely slower due to dequant overhead, AND there's an open vLLM bug"
+    print_warning "(github.com/vllm-project/vllm/issues/34694) where that exact fallback path"
+    print_warning "produces GARBLED output on GPUs without native FP4 support, not just a"
+    print_warning "slowdown. Not confirmed on Ampere/A100 specifically (reports are mostly"
+    print_warning "consumer Blackwell sm_120), but this GPU hits the same fallback code path,"
+    print_warning "so it isn't ruled out either. BF16 or FP8 are the safe choices here — the"
+    print_warning "real W4A4 speedup (and a known-correct code path) needs Blackwell"
+    print_warning "(create_gpu_vm.sh --gpu g4)."
+    if [ "${AUTO_YES:-false}" = "false" ]; then
+        read -p "Continue with NVFP4 on this GPU anyway? (y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            exit 1
+        fi
+    else
+        print_warning "Auto-continuing despite non-Blackwell GPU (--yes flag)"
+    fi
+}
+
 create_venv() {
     local work_dir=$1
 
@@ -639,13 +676,13 @@ init_quant_registry() {
     )
     QUANT_KEYS=("NVFP4" "FP8" "BF16")
     QUANT_DESCS=(
-        "NVIDIA 4-bit float. Fits on 1x L4 (24GB). ~99% of BF16 quality. Best for multi-user."
+        "NVIDIA 4-bit float, W4A4. Full speed (~2.5x) only on Blackwell (--gpu g4); on L4/A100 it falls back to a dequant path with no speedup and an unresolved vLLM bug risking garbled output (vllm#34694) — use BF16/FP8 on non-Blackwell GPUs instead."
         "Best quality-per-dollar. Fits on 2x L4 (48GB). Nearly lossless."
         "Full precision. Requires 1x A100 80GB (a2-ultragpu-1g). Baseline quality."
     )
     QUANT_VRAM=("~14 GB" "~27 GB" "~54 GB")
     QUANT_GPU_CONFIGS=(
-        "1x L4 (24GB) — g2-standard-12"
+        "1x RTX PRO 6000 Blackwell (96GB) — g4-standard-48 (full speed) | 1x L4 (24GB) — VRAM-only, no speedup"
         "2x L4 (48GB) — g2-standard-24"
         "1x A100 80GB — a2-ultragpu-1g"
     )
