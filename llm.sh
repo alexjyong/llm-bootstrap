@@ -204,9 +204,15 @@ MODEL_NAMES=(
     "Qwen 3.6-35B-A3B (MoE)"
     "Qwen 3.5-122B-A10B (MoE)"
     "Gemma 4 31B (dense)"
+    "Muse Glimmer 30B (dense, vision)"
 )
-MODEL_ARGS=("1" "2" "3" "4")
+MODEL_ARGS=("1" "2" "3" "4" "5")
+# Name keys used when dispatching to the docker backend — its model registry
+# is numbered differently (no 122B), and passing raw numbers fuzzy-matches
+# the wrong model there (e.g. "5" substring-matches "Qwen 3.6-35B-A3B").
+MODEL_KEYS=("27b" "35b-a3b" "122b" "gemma" "muse")
 QUANT_OPTIONS_LLAMACPP=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0")
+QUANT_OPTIONS_MUSE=("UD-Q2_K_XL" "UD-Q3_K_XL" "UD-Q4_K_XL" "UD-Q6_K_XL" "UD-Q8_K_XL" "Q8_0")
 QUANT_OPTIONS_VLLM=("NVFP4" "FP8" "BF16")
 
 pick_vm() {
@@ -311,8 +317,9 @@ pick_fixed_template() {
     done
     if [ "$has_flag" = "true" ]; then return; fi
 
-    # Model 4 (llamacpp/llamacpp-docker) is Gemma — the template only applies to Qwen.
-    if { [ "$BACKEND" = "llamacpp" ] || [ "$BACKEND" = "llamacpp-docker" ]; } && [ "$SELECTED_MODEL" = "4" ]; then
+    # Models 4 (Gemma) and 5 (Muse Glimmer) on the llama.cpp backends aren't
+    # Qwen — the template fix only applies to Qwen.
+    if { [ "$BACKEND" = "llamacpp" ] || [ "$BACKEND" = "llamacpp-docker" ]; } && [[ ! "$SELECTED_MODEL" =~ ^[123]$ ]]; then
         return
     fi
 
@@ -490,7 +497,12 @@ pick_quant() {
     local quants=()
     case "$BACKEND" in
         vllm|vllm-docker) quants=("${QUANT_OPTIONS_VLLM[@]}") ;;
-        *) quants=("${QUANT_OPTIONS_LLAMACPP[@]}") ;;
+        *)
+            if [ "$SELECTED_MODEL" = "5" ]; then
+                quants=("${QUANT_OPTIONS_MUSE[@]}")
+            else
+                quants=("${QUANT_OPTIONS_LLAMACPP[@]}")
+            fi ;;
     esac
 
     echo ""
@@ -630,6 +642,15 @@ do_deploy() {
             REMOTE_CMD="chmod +x ~/setup_llamacpp.sh && ~/setup_llamacpp.sh ${SETUP_FLAGS[*]}"
             ;;
         llamacpp-docker)
+            # Translate --model <number> to a name key (see MODEL_KEYS above).
+            for i in "${!SETUP_FLAGS[@]}"; do
+                if [ "${SETUP_FLAGS[$i]}" = "--model" ]; then
+                    MODEL_NUM="${SETUP_FLAGS[$((i+1))]}"
+                    if [[ "$MODEL_NUM" =~ ^[0-9]+$ ]]; then
+                        SETUP_FLAGS[$((i+1))]="${MODEL_KEYS[$((MODEL_NUM - 1))]:-$MODEL_NUM}"
+                    fi
+                fi
+            done
             scp_to_vm "$VM_NAME" "$VM_ZONE" --recurse "$SCRIPT_DIR/docker/"
             REMOTE_CMD="cd ~/docker && chmod +x setup_docker.sh && ./setup_docker.sh ${SETUP_FLAGS[*]}"
             ;;
@@ -1042,7 +1063,9 @@ case "$COMMAND" in
             "$BASE/v1/chat/completions" \
             -d "{\"model\":\"$MODEL\",\"messages\":[{\"role\":\"user\",\"content\":\"Say hello in exactly 3 words.\"}],\"max_tokens\":20}" \
             2>/dev/null)
-        CONTENT=$(echo "$CHAT_RESPONSE" | python3 -c 'import sys,json; print(json.load(sys.stdin)["choices"][0]["message"]["content"][:80])' 2>/dev/null)
+        # Some models (e.g. Muse Glimmer) always emit reasoning_content first,
+        # so a tiny max_tokens can leave content empty — accept either field.
+        CONTENT=$(echo "$CHAT_RESPONSE" | python3 -c 'import sys,json; m=json.load(sys.stdin)["choices"][0]["message"]; print((m.get("content") or m.get("reasoning_content") or "")[:80])' 2>/dev/null)
         if [ -n "$CONTENT" ]; then
             echo "PASS"
             echo "    → $CONTENT"

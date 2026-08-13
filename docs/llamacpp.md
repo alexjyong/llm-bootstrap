@@ -30,7 +30,7 @@ API is at `http://YOUR_VM_IP:8080/v1` with Bearer token auth.
 ## CLI Flags
 
 ```
---model <1|2|3>              Model selection (1=27B, 2=35B-A3B, 3=122B)
+--model <1|2|3|4|5>          Model selection (1=27B, 2=35B-A3B, 3=122B, 4=Gemma31B, 5=MuseGlimmer30B)
 --quant <Q3_K_M|...|Q8_0>   Quantization level
 --yes, -y                    Skip all prompts
 --start-only                 Restart existing service
@@ -91,6 +91,34 @@ watch -n 1 nvidia-smi                      # Monitor GPU
 | Q5_K_M | ~20GB | ~28GB | Great |
 | **Q6_K** (default for 27B) | ~23GB | ~32GB | Near-lossless |
 | Q8_0 | ~29GB | ~38GB | Best |
+
+### Context targets
+
+Qwen/Gemma: `262k` (native), `512k`, `768k`, `1m` — anything above native enables YaRN with `--rope-scale` + `--yarn-orig-ctx` derived from the target.
+
+Muse Glimmer (5): `131k` (native default), `262k` (YaRN 2x — the documented ceiling). Setting `--context-length` explicitly above native implies YaRN automatically. llama.cpp clamps context to the trained length from GGUF metadata, so the scripts pass `--override-kv muse-glimmer.context_length=int:<N>` alongside the YaRN flags — Muse's 13 global attention layers are NoPE (no positional encoding), which is why YaRN stretching degrades far less on this architecture than on full-RoPE models (community-verified with clean needle retrieval out to ~832K).
+
+### Muse Glimmer 30B (`--model 5`)
+
+Muse Glimmer uses Unsloth Dynamic quants instead of the classic K-quants:
+
+| Quant | Memory (RAM+VRAM) | Notes |
+|-------|-------------------|-------|
+| UD-Q2_K_XL | ~13 GB | Smallest usable |
+| UD-Q3_K_XL | ~15 GB | |
+| **UD-Q4_K_XL** (default) | ~18 GB | Recommended starting point |
+| UD-Q6_K_XL | ~23 GB | |
+| UD-Q8_K_XL | ~35 GB | Near-lossless |
+| Q8_0 | ~35 GB | Classic 8-bit |
+
+```bash
+./setup_llamacpp.sh --model 5 --quant UD-Q4_K_XL --yes                  # 131k native context
+./setup_llamacpp.sh --model 5 --quant UD-Q4_K_XL --context-target 262k --yes  # 262k via YaRN
+```
+
+The deploy also downloads the `mmproj-Muse-Glimmer-30B-BF16.gguf` vision adapter (multimodal input) and applies Meta's recommended sampling settings (`--temp 1.0 --top-p 0.95 --top-k 64`). Memory figures from [Unsloth's Muse Glimmer guide](https://unsloth.ai/docs/models/muse-glimmer).
+
+Note: Muse Glimmer's chat template always emits reasoning (its effort levels are set per-request, not via `--reasoning off` — that flag is ignored by its template). Responses include `reasoning_content` alongside `content`; clients that only read `content` should budget enough `max_tokens` for the reasoning preamble.
 
 ## Multi-GPU
 

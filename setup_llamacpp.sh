@@ -27,36 +27,45 @@ MODEL_NAMES=(
     "Qwen 3.6-35B-A3B (MoE)"
     "Qwen 3.5-122B-A10B (MoE)"
     "Gemma 4 31B (dense)"
+    "Muse Glimmer 30B (dense, vision)"
 )
 MODEL_DESCS=(
     "27B params, all active. Best quality per token."
     "35B total, 3B active per token. Fast, lower quality."
     "122B total, 10B active per token. Needs multi-GPU."
     "31B params, dense. Google model, Apache 2.0."
+    "30B params, dense + vision encoder. Meta agentic model, Apache 2.0."
 )
 MODEL_HF_REPOS=(
     "unsloth/Qwen3.6-27B-GGUF"
     "unsloth/Qwen3.6-35B-A3B-GGUF"
     "unsloth/Qwen3.5-122B-A10B-GGUF"
     "unsloth/gemma-4-31b-it-GGUF"
+    "unsloth/Muse-Glimmer-30B-GGUF"
 )
 MODEL_FILE_PATTERNS=(
     "Qwen3.6-27B"
     "Qwen3.6-35B-A3B"
     "Qwen3.5-122B-A10B"
     "gemma-4-31B-it"
+    "Muse-Glimmer-30B"
 )
-MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q4_K_M" "Q6_K")
-MODEL_DIR_NAMES=("qwen-27b-llamacpp" "qwen-35b-llamacpp" "qwen-122b-llamacpp" "gemma-31b-llamacpp")
-MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "qwen3.5-122b-a10b" "gemma4-31b")
+MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q4_K_M" "Q6_K" "UD-Q4_K_XL")
+MODEL_DIR_NAMES=("qwen-27b-llamacpp" "qwen-35b-llamacpp" "qwen-122b-llamacpp" "gemma-31b-llamacpp" "muse-glimmer-30b-llamacpp")
+MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "qwen3.5-122b-a10b" "gemma4-31b" "muse-glimmer-30b")
 MODEL_MMPROJ_FILES=(
     "mmproj-BF16.gguf"
     "mmproj-BF16.gguf"
     ""
     "mmproj-BF16.gguf"
+    "mmproj-Muse-Glimmer-30B-BF16.gguf"
 )
 
+# Muse Glimmer ships Unsloth Dynamic quants (UD-*_XL) instead of the
+# classic K-quants, so it gets its own quant list (applied after model
+# resolution below).
 QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0")
+MUSE_QUANT_OPTIONS=("UD-Q2_K_XL" "UD-Q3_K_XL" "UD-Q4_K_XL" "UD-Q6_K_XL" "UD-Q8_K_XL" "Q8_0")
 
 get_vram_estimate() {
     local model_idx=$1 quant=$2
@@ -69,6 +78,11 @@ get_vram_estimate() {
         2:Q6_K)   echo "~115 GB";; 2:Q8_0)   echo "~140 GB";;
         3:Q3_K_M) echo "~15 GB" ;; 3:Q4_K_M) echo "~18 GB" ;; 3:Q5_K_M) echo "~22 GB" ;;
         3:Q6_K)   echo "~25 GB" ;; 3:Q8_0)   echo "~33 GB" ;;
+        # Muse Glimmer 30B — memory figures from Unsloth's hardware table
+        # (https://unsloth.ai/docs/models/muse-glimmer), incl. BF16 mmproj
+        4:UD-Q2_K_XL) echo "~13 GB" ;; 4:UD-Q3_K_XL) echo "~15 GB" ;;
+        4:UD-Q4_K_XL) echo "~18 GB" ;; 4:UD-Q6_K_XL) echo "~23 GB" ;;
+        4:UD-Q8_K_XL) echo "~35 GB" ;; 4:Q8_0)       echo "~35 GB" ;;
         *) echo "unknown" ;;
     esac
 }
@@ -109,14 +123,15 @@ llama.cpp Setup
 Usage: ./setup_llamacpp.sh [options]
 
 Options:
-  --model <number|name>       Model selection (1=27B, 2=35B-A3B, 3=122B, 4=Gemma31B)
+  --model <number|name>       Model selection (1=27B, 2=35B-A3B, 3=122B, 4=Gemma31B, 5=MuseGlimmer30B)
   --quant <Q3_K_M|...|Q8_0>  Quantization level (skip interactive picker)
   --yes, -y                   Skip all prompts (non-interactive)
   --start-only                Skip installation, just start existing service
   --port <port>               API port (default: 8080)
   --context-length <N>        Exact context window in tokens (overrides --context-target)
   --context-target <target>   Context target: 262k, 512k, 768k, 1m (default: 262k)
-                              Targets above 262k enable YaRN rope scaling
+                              Muse Glimmer (5) instead offers: 131k (native), 262k (YaRN)
+                              Targets above native context enable YaRN rope scaling
   --kv-cache <preset>         KV cache preset: q8_0, mixed, q4_0 (default: q8_0)
   --parallel <N>              Concurrent request slots (default: 4)
   --thinking                  Enable thinking mode (default: disabled)
@@ -135,7 +150,8 @@ Models:
   1  Qwen 3.6-27B        27B params, all active. Best quality per token.
   2  Qwen 3.6-35B-A3B    35B total, 3B active. Fast, lower quality.
   3  Qwen 3.5-122B-A10B  122B total, 10B active. Needs multi-GPU.
-  4  Gemma 4 31B          31B params, dense. Google model, Apache 2.0.
+  4  Gemma 4 31B         31B params, dense. Google model.
+  5  Muse Glimmer 30B    30B dense + vision encoder. Meta agentic model.
 
 Quants:     Q3_K_M, Q4_K_M, Q5_K_M, Q6_K, Q8_0
 KV cache:   q8_0 (best quality), mixed (q8 keys/q4 values), q4_0 (max context)
@@ -311,8 +327,12 @@ MODEL_ALIAS="${MODEL_ALIASES[$MODEL_IDX]}"
 MMPROJ_FILE="${MODEL_MMPROJ_FILES[$MODEL_IDX]}"
 WORK_DIR="$HOME/$DIR_NAME"
 
-if [ "$ENABLE_FIXED_TEMPLATE" = "true" ] && [ "$MODEL_IDX" = "3" ]; then
-    echo "ERROR: --fixed-chat-template only supports Qwen models (1, 2, 3), not Gemma (4)."
+if [ "$MODEL_IDX" = "4" ]; then
+    QUANT_OPTIONS=("${MUSE_QUANT_OPTIONS[@]}")
+fi
+
+if [ "$ENABLE_FIXED_TEMPLATE" = "true" ] && [ "$MODEL_IDX" -gt 2 ]; then
+    echo "ERROR: --fixed-chat-template only supports Qwen models (1, 2, 3), not Gemma (4) or Muse Glimmer (5)."
     exit 1
 fi
 
@@ -475,10 +495,24 @@ CTX_TARGET_LABELS=(
     "768K   YaRN scaling — noticeable quality loss"
     "1M     YaRN scaling — significant quality loss at context edges"
 )
+DEFAULT_CTX_TARGET="262k"
+NATIVE_CTX=262144
+
+# Muse Glimmer: native context is 131072, documented ceiling is 262144
+# (via RoPE scaling) — https://unsloth.ai/docs/models/muse-glimmer
+if [ "$MODEL_IDX" = "4" ]; then
+    CTX_TARGET_OPTIONS=("131k" "262k")
+    CTX_TARGET_LABELS=(
+        "131K   native context, no quality loss"
+        "262K   YaRN scaling (2x) — documented ceiling, modest quality loss"
+    )
+    DEFAULT_CTX_TARGET="131k"
+    NATIVE_CTX=131072
+fi
 
 if [ -z "$CONTEXT_TARGET" ]; then
     if [ "$AUTO_YES" = "true" ]; then
-        CONTEXT_TARGET="262k"
+        CONTEXT_TARGET="$DEFAULT_CTX_TARGET"
     else
         echo ""
         echo "Select context target:"
@@ -491,7 +525,7 @@ if [ -z "$CONTEXT_TARGET" ]; then
         echo ""
         while true; do
             read -p "Context [1-${#CTX_TARGET_OPTIONS[@]}] (Enter for default): " choice
-            if [ -z "$choice" ]; then CONTEXT_TARGET="262k"; break; fi
+            if [ -z "$choice" ]; then CONTEXT_TARGET="$DEFAULT_CTX_TARGET"; break; fi
             if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#CTX_TARGET_OPTIONS[@]} ]; then
                 CONTEXT_TARGET="${CTX_TARGET_OPTIONS[$((choice - 1))]}"; break
             fi
@@ -500,13 +534,33 @@ if [ -z "$CONTEXT_TARGET" ]; then
     fi
 fi
 
-case "$CONTEXT_TARGET" in
-    262k) MAX_CONTEXT=262144;  USE_YARN=false ;;
-    512k) MAX_CONTEXT=524288;  USE_YARN=true ;;
-    768k) MAX_CONTEXT=786432;  USE_YARN=true ;;
-    1m)   MAX_CONTEXT=1048576; USE_YARN=true ;;
-    *) echo "ERROR: Unknown context target '$CONTEXT_TARGET'. Use: 262k, 512k, 768k, 1m"; exit 1 ;;
-esac
+if [ "$MODEL_IDX" = "4" ]; then
+    case "$CONTEXT_TARGET" in
+        131k) MAX_CONTEXT=131072; USE_YARN=false ;;
+        262k) MAX_CONTEXT=262144; USE_YARN=true ;;
+        *) echo "ERROR: Unknown context target '$CONTEXT_TARGET' for Muse Glimmer. Use: 131k, 262k"; exit 1 ;;
+    esac
+else
+    case "$CONTEXT_TARGET" in
+        262k) MAX_CONTEXT=262144;  USE_YARN=false ;;
+        512k) MAX_CONTEXT=524288;  USE_YARN=true ;;
+        768k) MAX_CONTEXT=786432;  USE_YARN=true ;;
+        1m)   MAX_CONTEXT=1048576; USE_YARN=true ;;
+        *) echo "ERROR: Unknown context target '$CONTEXT_TARGET'. Use: 262k, 512k, 768k, 1m"; exit 1 ;;
+    esac
+fi
+
+# An explicit --context-length above native context implies YaRN, otherwise
+# llama.cpp just clamps --ctx-size back down to the trained length.
+if [ "$CONTEXT_LENGTH" != "auto" ] && [ "$CONTEXT_LENGTH" -gt "$NATIVE_CTX" ]; then
+    USE_YARN=true
+    if [ "$CONTEXT_LENGTH" -gt "$MAX_CONTEXT" ]; then
+        echo "ERROR: --context-length $CONTEXT_LENGTH exceeds the ${CONTEXT_TARGET} target's max ($MAX_CONTEXT)."
+        echo "Use --context-target to raise the cap, or lower --context-length."
+        exit 1
+    fi
+    MAX_CONTEXT=$CONTEXT_LENGTH
+fi
 
 GGUF_FILENAME=$(get_gguf_filename "$FILE_PATTERN" "$QUANT")
 VRAM_EST=$(get_vram_estimate $MODEL_IDX "$QUANT")
@@ -535,6 +589,7 @@ echo "  Thinking:    $([ "$ENABLE_THINKING" = "true" ] && echo "ENABLED" || echo
 echo "  MTP:         $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
 echo "  DFlash:      $([ "$ENABLE_DFLASH" = "true" ] && echo "ENABLED (spec-draft-n-max: $DFLASH_SPEC_DRAFT_N_MAX, self-converted draft)" || echo "disabled")"
 echo "  Chat tmpl:   $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
+[ "$MODEL_IDX" = "4" ] && echo "  Sampling:    temp=1.0 top-p=0.95 top-k=64 (Meta recommended)"
 echo "  Directory:   $WORK_DIR"
 echo ""
 
@@ -812,6 +867,13 @@ if [ "$ENABLE_THINKING" = "false" ]; then
     THINKING_FLAG="--reasoning off"
 fi
 
+# Meta's recommended Muse Glimmer generation settings
+# (https://unsloth.ai/docs/models/muse-glimmer)
+SAMPLER_FLAGS=""
+if [ "$MODEL_IDX" = "4" ]; then
+    SAMPLER_FLAGS="--temp 1.0 --top-p 0.95 --top-k 64"
+fi
+
 MMPROJ_FLAG=""
 if [ -n "$MMPROJ_PATH" ] && [ -f "$MMPROJ_PATH" ]; then
     MMPROJ_FLAG="--mmproj $MMPROJ_PATH"
@@ -819,7 +881,14 @@ fi
 
 YARN_FLAG=""
 if [ "$USE_YARN" = "true" ]; then
-    YARN_FLAG="--rope-scaling yarn"
+    # Scale factor = target / native trained context (Qwen: 262144, Muse: 131072)
+    ROPE_SCALE=$(python3 -c "print($MAX_CONTEXT / $NATIVE_CTX)")
+    YARN_FLAG="--rope-scaling yarn --rope-scale $ROPE_SCALE --yarn-orig-ctx $NATIVE_CTX"
+    # Muse Glimmer: llama.cpp clamps --ctx-size to the trained length read
+    # from GGUF metadata — override it (same trick verified to 1M context:
+    # https://www.reddit.com/r/LocalLLaMA — Muse's global layers are NoPE, so
+    # YaRN stretching degrades far less than on full-RoPE architectures)
+    YARN_FLAG="$YARN_FLAG --override-kv muse-glimmer.context_length=int:$MAX_CONTEXT"
 fi
 
 MTP_FLAGS=""
@@ -868,6 +937,7 @@ ExecStart=$WORK_DIR/bin/llama-server \\
     --jinja \\
     $CHAT_TEMPLATE_FLAG \\
     $THINKING_FLAG \\
+    $SAMPLER_FLAGS \\
     $MTP_FLAGS \\
     $DFLASH_FLAGS \\
     --metrics

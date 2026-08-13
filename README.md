@@ -136,7 +136,10 @@ Use `--static-ip` when creating the VM to keep the same IP.
 | Engine | Options | Recommended |
 |--------|---------|-------------|
 | llama.cpp (GGUF) | Q3_K_M, Q4_K_M, Q5_K_M, Q6_K, Q8_0 | **Q6_K** (best quality/VRAM tradeoff) |
+| llama.cpp (Muse Glimmer) | UD-Q2_K_XL, UD-Q3_K_XL, UD-Q4_K_XL, UD-Q6_K_XL, UD-Q8_K_XL, Q8_0 | **UD-Q4_K_XL** (~18 GB, Unsloth Dynamic) |
 | vLLM | NVFP4, FP8, BF16 | **FP8** (near-lossless, fits on 2x L4) |
+
+Muse Glimmer 30B (`--model 5`, llama.cpp backends only) is Meta's agentic vision model. Deploys include its `mmproj` vision adapter and Meta's recommended sampling settings (temp 1.0, top-p 0.95, top-k 64). Its template always reasons first (responses carry `reasoning_content`), so budget `max_tokens` accordingly. See [unsloth/Muse-Glimmer-30B-GGUF](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF).
 
 Higher quants = better quality but more VRAM. Hardware requirements: [docs/hardware.md](docs/hardware.md)
 
@@ -189,7 +192,7 @@ Pass `--fixed-chat-template` (or answer the wizard prompt) to use [froggeric/Qwe
 ./llm.sh deploy VM_NAME --backend vllm --fixed-chat-template --yes
 ```
 
-This is opt-in and only applies to Qwen models (it's rejected for the Gemma option on the llama.cpp backends). The template is downloaded from a pinned commit, not `main`, so a running deploy won't change behavior if the upstream repo is edited later — these are third-party, unverified claims, so treat it as experimental.
+This is opt-in and only applies to Qwen models (it's rejected for the Gemma and Muse Glimmer options on the llama.cpp backends). The template is downloaded from a pinned commit, not `main`, so a running deploy won't change behavior if the upstream repo is edited later — these are third-party, unverified claims, so treat it as experimental.
 
 ### DFlash speculative decoding
 

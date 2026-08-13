@@ -17,26 +17,34 @@ MODEL_NAMES=(
     "Qwen 3.6-27B (dense)"
     "Qwen 3.6-35B-A3B (MoE)"
     "Gemma 4 31B (dense)"
+    "Muse Glimmer 30B (dense, vision)"
 )
 MODEL_HF_REPOS=(
     "unsloth/Qwen3.6-27B-GGUF"
     "unsloth/Qwen3.6-35B-A3B-GGUF"
     "unsloth/gemma-4-31b-it-GGUF"
+    "unsloth/Muse-Glimmer-30B-GGUF"
 )
 MODEL_FILE_PATTERNS=(
     "Qwen3.6-27B"
     "Qwen3.6-35B-A3B"
     "gemma-4-31B-it"
+    "Muse-Glimmer-30B"
 )
 MODEL_MMPROJ_FILES=(
     "mmproj-BF16.gguf"
     "mmproj-BF16.gguf"
     "mmproj-BF16.gguf"
+    "mmproj-Muse-Glimmer-30B-BF16.gguf"
 )
-MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "gemma4-31b")
-MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q6_K")
+MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "gemma4-31b" "muse-glimmer-30b")
+MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q6_K" "UD-Q4_K_XL")
 
+# Muse Glimmer ships Unsloth Dynamic quants (UD-*_XL) instead of the
+# classic K-quants, so it gets its own quant list (applied after model
+# resolution below).
 QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0")
+MUSE_QUANT_OPTIONS=("UD-Q2_K_XL" "UD-Q3_K_XL" "UD-Q4_K_XL" "UD-Q6_K_XL" "UD-Q8_K_XL" "Q8_0")
 
 DOCKER_IMAGE="ghcr.io/alexjyong/llm-bootstrap/llama-server:latest"
 WORK_DIR="$HOME/llama-docker"
@@ -71,11 +79,12 @@ Docker llama.cpp Setup
 Usage: ./setup_docker.sh [options]
 
 Options:
-  --model <number>            Model (1=27B, 2=35B-A3B)
+  --model <number>            Model (1=27B, 2=35B-A3B, 3=Gemma31B, 4=MuseGlimmer30B)
   --quant <Q3_K_M|...|Q8_0>  Quantization
   --kv-cache <preset>         KV cache preset: q8_0, mixed, q4_0 (default: q8_0)
   --context-target <target>   Context target: 262k, 512k, 768k, 1m (default: 262k)
-                              Targets above 262k enable YaRN rope scaling
+                              Muse Glimmer (4) instead offers: 131k (native), 262k (YaRN)
+                              Targets above native context enable YaRN rope scaling
   --yes, -y                   Skip prompts
   --start-only                Restart existing container
   --port <port>               API port (default: 8080)
@@ -152,6 +161,14 @@ if [ -n "$MODEL_ARG" ]; then
             break
         fi
     done
+    # A purely numeric arg that didn't exact-match is out of range — never
+    # fuzzy-match digits ("5" would substring-match "Qwen 3.6-35B-A3B" and
+    # silently deploy the wrong model).
+    if [ "$MODEL_IDX" = "-1" ] && [[ "$MODEL_ARG" =~ ^[0-9]+$ ]]; then
+        echo "ERROR: Model number $MODEL_ARG out of range (1-${#MODEL_NAMES[@]}). Available:"
+        for i in "${!MODEL_NAMES[@]}"; do echo "  $((i+1))) ${MODEL_NAMES[$i]}"; done
+        exit 1
+    fi
     if [ "$MODEL_IDX" = "-1" ]; then
         for i in "${!MODEL_NAMES[@]}"; do
             if [[ "${MODEL_NAMES[$i],,}" == *"${MODEL_ARG,,}"* ]]; then
@@ -190,8 +207,12 @@ MMPROJ_FILE="${MODEL_MMPROJ_FILES[$MODEL_IDX]}"
 MODEL_ALIAS="${MODEL_ALIASES[$MODEL_IDX]}"
 [ -n "$IDENTIFIER" ] && MODEL_ALIAS="$IDENTIFIER"
 
-if [ "$ENABLE_FIXED_TEMPLATE" = "true" ] && [ "$MODEL_IDX" = "2" ]; then
-    echo "ERROR: --fixed-chat-template only supports Qwen models (1, 2), not Gemma (3)."
+if [ "$MODEL_IDX" = "3" ]; then
+    QUANT_OPTIONS=("${MUSE_QUANT_OPTIONS[@]}")
+fi
+
+if [ "$ENABLE_FIXED_TEMPLATE" = "true" ] && [ "$MODEL_IDX" -gt 1 ]; then
+    echo "ERROR: --fixed-chat-template only supports Qwen models (1, 2), not Gemma (3) or Muse Glimmer (4)."
     exit 1
 fi
 
@@ -332,10 +353,24 @@ CTX_TARGET_LABELS=(
     "768K   YaRN scaling — noticeable quality loss"
     "1M     YaRN scaling — significant quality loss at context edges"
 )
+DEFAULT_CTX_TARGET="262k"
+NATIVE_CTX=262144
+
+# Muse Glimmer: native context is 131072, documented ceiling is 262144
+# (via RoPE scaling) — https://unsloth.ai/docs/models/muse-glimmer
+if [ "$MODEL_IDX" = "3" ]; then
+    CTX_TARGET_OPTIONS=("131k" "262k")
+    CTX_TARGET_LABELS=(
+        "131K   native context, no quality loss"
+        "262K   YaRN scaling (2x) — documented ceiling, modest quality loss"
+    )
+    DEFAULT_CTX_TARGET="131k"
+    NATIVE_CTX=131072
+fi
 
 if [ -z "$CONTEXT_TARGET" ]; then
     if [ "$AUTO_YES" = "true" ]; then
-        CONTEXT_TARGET="262k"
+        CONTEXT_TARGET="$DEFAULT_CTX_TARGET"
     else
         echo ""
         echo "Select context target:"
@@ -348,7 +383,7 @@ if [ -z "$CONTEXT_TARGET" ]; then
         echo ""
         while true; do
             read -p "Context [1-${#CTX_TARGET_OPTIONS[@]}] (Enter for default): " choice
-            if [ -z "$choice" ]; then CONTEXT_TARGET="262k"; break; fi
+            if [ -z "$choice" ]; then CONTEXT_TARGET="$DEFAULT_CTX_TARGET"; break; fi
             if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#CTX_TARGET_OPTIONS[@]} ]; then
                 CONTEXT_TARGET="${CTX_TARGET_OPTIONS[$((choice - 1))]}"; break
             fi
@@ -357,22 +392,44 @@ if [ -z "$CONTEXT_TARGET" ]; then
     fi
 fi
 
-case "$CONTEXT_TARGET" in
-    262k) MAX_CONTEXT=262144;  USE_YARN=false ;;
-    512k) MAX_CONTEXT=524288;  USE_YARN=true ;;
-    768k) MAX_CONTEXT=786432;  USE_YARN=true ;;
-    1m)   MAX_CONTEXT=1048576; USE_YARN=true ;;
-    *) echo "ERROR: Unknown context target '$CONTEXT_TARGET'. Use: 262k, 512k, 768k, 1m"; exit 1 ;;
-esac
+if [ "$MODEL_IDX" = "3" ]; then
+    case "$CONTEXT_TARGET" in
+        131k) MAX_CONTEXT=131072; USE_YARN=false ;;
+        262k) MAX_CONTEXT=262144; USE_YARN=true ;;
+        *) echo "ERROR: Unknown context target '$CONTEXT_TARGET' for Muse Glimmer. Use: 131k, 262k"; exit 1 ;;
+    esac
+else
+    case "$CONTEXT_TARGET" in
+        262k) MAX_CONTEXT=262144;  USE_YARN=false ;;
+        512k) MAX_CONTEXT=524288;  USE_YARN=true ;;
+        768k) MAX_CONTEXT=786432;  USE_YARN=true ;;
+        1m)   MAX_CONTEXT=1048576; USE_YARN=true ;;
+        *) echo "ERROR: Unknown context target '$CONTEXT_TARGET'. Use: 262k, 512k, 768k, 1m"; exit 1 ;;
+    esac
+fi
 
 # Apply context target as cap (--context-length overrides if explicitly set)
 if [ "$CONTEXT_LENGTH" = "262144" ]; then
     CONTEXT_LENGTH=$MAX_CONTEXT
+else
+    # An explicit --context-length above native context implies YaRN, otherwise
+    # llama.cpp just clamps --ctx-size back down to the trained length.
+    if [ "$CONTEXT_LENGTH" -gt "$NATIVE_CTX" ]; then
+        USE_YARN=true
+        MAX_CONTEXT=$CONTEXT_LENGTH
+    fi
 fi
 
 EXTRA_FLAGS=""
 if [ "$USE_YARN" = "true" ]; then
-    EXTRA_FLAGS="--rope-scaling yarn"
+    # Scale factor = target / native trained context (Qwen: 262144, Muse: 131072)
+    ROPE_SCALE=$(python3 -c "print($MAX_CONTEXT / $NATIVE_CTX)")
+    EXTRA_FLAGS="--rope-scaling yarn --rope-scale $ROPE_SCALE --yarn-orig-ctx $NATIVE_CTX"
+    # Muse Glimmer: llama.cpp clamps --ctx-size to the trained length read
+    # from GGUF metadata — override it (same trick verified to 1M context:
+    # https://www.reddit.com/r/LocalLLaMA — Muse's global layers are NoPE, so
+    # YaRN stretching degrades far less than on full-RoPE architectures)
+    EXTRA_FLAGS="$EXTRA_FLAGS --override-kv muse-glimmer.context_length=int:$MAX_CONTEXT"
 fi
 if [ "$ENABLE_MTP" = "true" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --spec-type draft-mtp --spec-draft-n-max 3"
@@ -387,6 +444,11 @@ if [ "$ENABLE_FIXED_TEMPLATE" = "true" ]; then
     if download_fixed_chat_template "$WORK_DIR/models/chat_template.jinja"; then
         EXTRA_FLAGS="$EXTRA_FLAGS --chat-template-file /models/chat_template.jinja"
     fi
+fi
+# Meta's recommended Muse Glimmer generation settings
+# (https://unsloth.ai/docs/models/muse-glimmer)
+if [ "$MODEL_IDX" = "3" ]; then
+    EXTRA_FLAGS="$EXTRA_FLAGS --temp 1.0 --top-p 0.95 --top-k 64"
 fi
 
 YARN_DISPLAY="off"
@@ -409,6 +471,7 @@ echo "  Image:     $DOCKER_IMAGE"
 echo "  MTP:       $([ "$ENABLE_MTP" = "true" ] && echo "ENABLED (spec-draft-n-max: 3)" || echo "disabled")"
 echo "  DFlash:    $([ "$ENABLE_DFLASH" = "true" ] && echo "ENABLED (spec-draft-n-max: $DFLASH_SPEC_DRAFT_N_MAX, self-converted draft)" || echo "disabled")"
 echo "  Chat tmpl: $([ "$ENABLE_FIXED_TEMPLATE" = "true" ] && echo "fixed (froggeric)" || echo "default")"
+[ "$MODEL_IDX" = "3" ] && echo "  Sampling:  temp=1.0 top-p=0.95 top-k=64 (Meta recommended)"
 echo ""
 
 if [ "$AUTO_YES" = "false" ]; then
@@ -549,6 +612,23 @@ if [ "$ENABLE_DFLASH" = "true" ]; then
         sudo docker build -t "$DOCKER_IMAGE" "$(dirname "$0")"
         if ! sudo docker run --rm --gpus all "$DOCKER_IMAGE" --help 2>&1 | grep -q "draft-dflash"; then
             echo "ERROR: Rebuilt image still doesn't support --spec-type draft-dflash. Aborting."
+            exit 1
+        fi
+    fi
+fi
+
+# Same staleness guard for Muse Glimmer: the pulled image can predate
+# llama.cpp's Muse Glimmer architecture support. The arch string is
+# "muse-glimmer" and lives in the shared libs (libllama.so), not the
+# llama-server binary — so grep both.
+if [ "$MODEL_IDX" = "3" ]; then
+    if ! sudo docker run --rm --entrypoint grep "$DOCKER_IMAGE" -qra "muse-glimmer" /usr/local/lib /usr/local/bin; then
+        echo "  WARNING: Pulled image predates llama.cpp's Muse Glimmer support (it's"
+        echo "  only rebuilt on-demand, not automatically). Rebuilding locally from"
+        echo "  current master (this takes ~15 min)..."
+        sudo docker build -t "$DOCKER_IMAGE" "$(dirname "$0")"
+        if ! sudo docker run --rm --entrypoint grep "$DOCKER_IMAGE" -qra "muse-glimmer" /usr/local/lib /usr/local/bin; then
+            echo "ERROR: Rebuilt image still doesn't support the muse-glimmer architecture. Aborting."
             exit 1
         fi
     fi
