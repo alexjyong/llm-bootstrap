@@ -30,7 +30,7 @@ API is at `http://YOUR_VM_IP:8080/v1` with Bearer token auth.
 ## CLI Flags
 
 ```
---model <1|2|3|4|5>          Model selection (1=27B, 2=35B-A3B, 3=122B, 4=Gemma31B, 5=MuseGlimmer30B)
+--model <1|2|3|4|5|6>        Model selection (1=27B, 2=35B-A3B, 3=122B, 4=Gemma31B, 5=MuseGlimmer30B, 6=Qwen3.8-27B)
 --quant <Q3_K_M|...|Q8_0>   Quantization level
 --yes, -y                    Skip all prompts
 --start-only                 Restart existing service
@@ -92,11 +92,15 @@ watch -n 1 nvidia-smi                      # Monitor GPU
 | **Q6_K** (default for 27B) | ~23GB | ~32GB | Near-lossless |
 | Q8_0 | ~29GB | ~38GB | Best |
 
+"27B Size" applies to both Qwen 3.6-27B (`--model 1`) and Qwen 3.8-27B (`--model 6`) — same dense parameter count, near-identical file sizes.
+
 ### Context targets
 
-Qwen/Gemma: `262k` (native), `512k`, `768k`, `1m` — anything above native enables YaRN with `--rope-scale` + `--yarn-orig-ctx` derived from the target.
+Qwen/Gemma/Qwen 3.8: `262k` (native), `512k`, `768k`, `1m` — anything above native enables YaRN with `--rope-scale` + `--yarn-orig-ctx` derived from the target.
 
-Muse Glimmer (5): `131k` (native default), `262k` (YaRN 2x — the documented ceiling). Setting `--context-length` explicitly above native implies YaRN automatically. llama.cpp clamps context to the trained length from GGUF metadata, so the scripts pass `--override-kv muse-glimmer.context_length=int:<N>` alongside the YaRN flags — Muse's 13 global attention layers are NoPE (no positional encoding), which is why YaRN stretching degrades far less on this architecture than on full-RoPE models (community-verified with clean needle retrieval out to ~832K).
+Muse Glimmer (5): `131k` (native default), `262k` (YaRN 2x — the documented ceiling). Setting `--context-length` explicitly above native implies YaRN automatically.
+
+**llama.cpp clamps the real serving context to the GGUF's own `n_ctx_train` regardless of the YaRN flags above, silently and with no error** — for every model here, not just Muse. The scripts work around it with `--override-kv <arch>.context_length=int:<N>`, where `<arch>` is that specific model's GGUF architecture tag (`MODEL_ARCH_TAGS` in the scripts: `qwen35` for models 1/6, `qwen35moe` for models 2/3, `gemma4` for model 4, `muse-glimmer` for model 5 — confirmed by reading each model's actual GGUF header, not guessed from repo names). Using the wrong key here doesn't error, it just silently doesn't take effect — this was previously hardcoded to `muse-glimmer.context_length` for every model, meaning `--context-target` above native was a no-op for every non-Muse model until this was found and fixed (see `docs/qwen-3.6-vs-3.8-research.md` for how). Muse's 13 global attention layers are NoPE (no positional encoding), which is why YaRN stretching degrades far less on that architecture than on full-RoPE models (community-verified with clean needle retrieval out to ~832K) — that verification is Muse-specific and doesn't extend to the other models.
 
 ### Muse Glimmer 30B (`--model 5`)
 
@@ -119,6 +123,31 @@ Muse Glimmer uses Unsloth Dynamic quants instead of the classic K-quants:
 The deploy also downloads the `mmproj-Muse-Glimmer-30B-BF16.gguf` vision adapter (multimodal input) and applies Meta's recommended sampling settings (`--temp 1.0 --top-p 0.95 --top-k 64`). Memory figures from [Unsloth's Muse Glimmer guide](https://unsloth.ai/docs/models/muse-glimmer).
 
 Note: Muse Glimmer's chat template always emits reasoning (its effort levels are set per-request, not via `--reasoning off` — that flag is ignored by its template). Responses include `reasoning_content` alongside `content`; clients that only read `content` should budget enough `max_tokens` for the reasoning preamble.
+
+### Qwen 3.8-27B (`--model 6`)
+
+Newer than Qwen 3.6-27B, built on the Qwen 3.5 architecture (GGUF arch tag `qwen35`, already supported by llama.cpp — no upstream arch work needed, unlike Muse Glimmer). Same 27B dense size class, same 262K native / 1M YaRN-extensible context as the other Qwen models here, and ships with a vision encoder (`mmproj-BF16.gguf`, downloaded automatically like models 1/2/4).
+
+```bash
+./setup_llamacpp.sh --model 6 --quant Q6_K --yes
+```
+
+**⚠️ `reasoning_effort` support is incomplete until an upstream fix lands.** Qwen 3.8's chat template natively accepts a `reasoning_effort` parameter (`low`/`medium`/`high`) to tune reasoning depth per request. llama.cpp's OpenAI-compat layer currently only understands `reasoning_effort: "none"` (fully disables thinking) — any other value is silently dropped before it reaches the template. [PR #26941](https://github.com/ggml-org/llama.cpp/pull/26941) fixes this (and adds a `reasoning_strength` translation for Muse Glimmer specifically), but as of 2026-08-14 it's still open with changes requested. Until it merges — and until this repo's `setup_llamacpp.sh` picks up a llama.cpp build that includes it — only full on/off control works here (`--thinking` / `--reasoning off`); intermediate effort levels won't reach the model. **Revisit this note once #26941 (or an equivalent fix) merges upstream.**
+
+Not eligible for `--fixed-chat-template` (that fix targets Qwen 3.5/3.6's specific template bugs and hasn't been checked against 3.8's template) or `--dflash` (no DFlash draft GGUF exists for this model).
+
+**`--mtp` works** — unlike Qwen 3.6-27B, no separate MTP-suffixed repo is needed: the MTP head tensors ship in every quant of the default `unsloth/Qwen3.8-27B-GGUF` release already (confirmed via HF model card + GGUF tensor count, and via `common_speculative_init_result: creating MTP draft context against the target model` in llama-server's own startup log — it derives the draft context straight from the loaded target GGUF). Same caveats as model 1: forces `--parallel 1` and disables vision, both enforced automatically by `--mtp`.
+
+Head-to-head against Qwen 3.6-27B on identical hardware (2x L4, Q6_K, same 350-token prompt, back-to-back on the same VM):
+
+| Model | Baseline | +MTP | Speedup |
+|-------|----------|------|---------|
+| Qwen 3.6-27B | 10.97 tok/s | 17.94 tok/s | ~1.64x |
+| Qwen 3.8-27B | 10.91 tok/s | 16.81 tok/s | ~1.54x |
+
+Baseline decode speed is essentially identical between the two (expected — same dense 27B size class). 3.8's MTP speedup is slightly lower than 3.6's, though both are single-sample measurements on one prompt, not a rigorous benchmark. Tool-calling output (a nested-schema function call) came out byte-for-byte identical with and without `--mtp` on both models — consistent with MTP being lossless at greedy/default sampling. As of 2026-08-14 no public reports of anyone else running Qwen 3.8-27B with MTP were found, so treat these numbers as preliminary but real, working results.
+
+**Tool-calling and agentic behavior:** both models correctly handle a nested-object function-calling schema (price ranges, category arrays, enums) via the standard `tools`/`tool_calls` API. Qwen 3.8's model card advertises "Developer Role Support... in agentic tools like Codex," but **this doesn't actually work through this repo's llama.cpp deploys** — a message with `"role": "developer"` is silently ignored by llama-server (the identical instruction sent as `"role": "system"` was followed correctly). This matches the existing caveat in [docs/client-setup.md](client-setup.md) that llama-server doesn't support the `developer` role — it's a llama-server limitation, not something specific to Qwen 3.8's template.
 
 ## Multi-GPU
 

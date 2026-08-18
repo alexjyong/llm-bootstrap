@@ -80,7 +80,7 @@ Config: `~/.pi/agent/models.json` (reloads when you open `/model` — no restart
 }
 ```
 
-The `compat` flags are important — llama-server doesn't support the `developer` role or `reasoning_effort` parameter, and uses `max_tokens` instead of `max_completion_tokens`.
+The `compat` flags are important — llama-server doesn't support the `developer` role or `reasoning_effort` parameter, and uses `max_tokens` instead of `max_completion_tokens`. (`reasoning_effort` is dropped for every model here, not just Muse Glimmer/Qwen 3.8 — [PR #26941](https://github.com/ggml-org/llama.cpp/pull/26941) upstream fixes this but is still open as of 2026-08-14. Flip `supportsReasoningEffort` to `true` once this repo's llama.cpp build picks up that fix or an equivalent.)
 
 The `apiKey` field accepts a literal value, an environment variable name, or a shell command prefixed with `!` (e.g., `"!cat ~/qwen-27b/.api_key"`).
 

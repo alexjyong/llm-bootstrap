@@ -141,6 +141,8 @@ Use `--static-ip` when creating the VM to keep the same IP.
 
 Muse Glimmer 30B (`--model 5`, llama.cpp backends only) is Meta's agentic vision model. Deploys include its `mmproj` vision adapter and Meta's recommended sampling settings (temp 1.0, top-p 0.95, top-k 64). Its template always reasons first (responses carry `reasoning_content`), so budget `max_tokens` accordingly. See [unsloth/Muse-Glimmer-30B-GGUF](https://huggingface.co/unsloth/Muse-Glimmer-30B-GGUF).
 
+Qwen 3.8-27B (`--model 6`, llama.cpp backends only) is a newer, vision-capable release of the same dense 27B size class as `--model 1`, with tunable `reasoning_effort` support baked into its chat template. **That control doesn't fully work yet**: llama.cpp currently drops any `reasoning_effort` value besides `"none"` before it reaches the template — [PR #26941](https://github.com/ggml-org/llama.cpp/pull/26941) fixes this upstream but is still open/unmerged as of 2026-08-14. Until it lands, only full on/off thinking control (`--thinking`) is available for this model. Unlike Qwen 3.6-27B, `--mtp` works out of the box here — its default GGUF already ships the MTP head (no separate `-MTP-` repo needed) — confirmed working with a measured ~1.54x generation speedup (vs. ~1.64x for Qwen 3.6-27B on the same hardware/quant) in this repo's own head-to-head testing. See [docs/llamacpp.md](docs/llamacpp.md#qwen-38-27b---model-6).
+
 Higher quants = better quality but more VRAM. Hardware requirements: [docs/hardware.md](docs/hardware.md)
 
 ## Advanced

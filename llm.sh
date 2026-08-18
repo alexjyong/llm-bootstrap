@@ -205,12 +205,13 @@ MODEL_NAMES=(
     "Qwen 3.5-122B-A10B (MoE)"
     "Gemma 4 31B (dense)"
     "Muse Glimmer 30B (dense, vision)"
+    "Qwen 3.8-27B (dense, vision)"
 )
-MODEL_ARGS=("1" "2" "3" "4" "5")
+MODEL_ARGS=("1" "2" "3" "4" "5" "6")
 # Name keys used when dispatching to the docker backend — its model registry
 # is numbered differently (no 122B), and passing raw numbers fuzzy-matches
 # the wrong model there (e.g. "5" substring-matches "Qwen 3.6-35B-A3B").
-MODEL_KEYS=("27b" "35b-a3b" "122b" "gemma" "muse")
+MODEL_KEYS=("27b" "35b-a3b" "122b" "gemma" "muse" "3.8-27b")
 QUANT_OPTIONS_LLAMACPP=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0")
 QUANT_OPTIONS_MUSE=("UD-Q2_K_XL" "UD-Q3_K_XL" "UD-Q4_K_XL" "UD-Q6_K_XL" "UD-Q8_K_XL" "Q8_0")
 QUANT_OPTIONS_VLLM=("NVFP4" "FP8" "BF16")
@@ -342,9 +343,9 @@ pick_speculative_decoding() {
     done
     if [ "$has_mtp" = "true" ] || [ "$has_dflash" = "true" ]; then return; fi
 
-    # MTP: llama.cpp backends only for model 1 (27B); vLLM always (only serves 27B)
+    # MTP: llama.cpp backends for model 1 (Qwen 3.6-27B) or 6 (Qwen 3.8-27B); vLLM always (only serves 27B)
     local mtp_available=false
-    if [ "$BACKEND" = "vllm" ] || [ "$BACKEND" = "vllm-docker" ] || [ "$SELECTED_MODEL" = "1" ]; then
+    if [ "$BACKEND" = "vllm" ] || [ "$BACKEND" = "vllm-docker" ] || [ "$SELECTED_MODEL" = "1" ] || [ "$SELECTED_MODEL" = "6" ]; then
         mtp_available=true
     fi
     # DFlash: llama.cpp backends only, model 1 (27B) only
@@ -868,7 +869,7 @@ case "$COMMAND" in
             --zone="$ZONE" \
             --project="$PROJECT" \
             --command="
-                KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '(not found)')
+                KEY=\$(cat ~/qwen*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '(not found)')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
                 MODEL=\$(curl -s -H \"Authorization: Bearer \$KEY\" http://localhost:\$PORT/v1/models 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"data\"][0][\"id\"])' 2>/dev/null || echo '(unknown)')
                 NGROK_URL=\$(cat ~/.ngrok_url 2>/dev/null || echo '')
@@ -987,7 +988,7 @@ case "$COMMAND" in
             --zone="$ZONE" \
             --project="$PROJECT" \
             --command="
-                KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '')
+                KEY=\$(cat ~/qwen*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
                 NGROK_URL=\$(cat ~/.ngrok_url 2>/dev/null || echo '')
                 echo \"\$KEY|\$PORT|\$NGROK_URL\"
@@ -1123,7 +1124,7 @@ case "$COMMAND" in
             --zone="$ZONE" \
             --project="$PROJECT" \
             --command="
-                KEY=\$(cat ~/qwen-*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '')
+                KEY=\$(cat ~/qwen*/.api_key ~/gemma-*/.api_key ~/llama-docker/.api_key ~/vllm-docker/.api_key 2>/dev/null | head -1 || echo '')
                 PORT=\$(ss -tlnp 2>/dev/null | grep -oP '0\.0\.0\.0:\K(8080|8000)' | head -1 || echo '8080')
                 echo \"\$KEY|\$PORT\"
             " 2>/dev/null)

@@ -18,27 +18,37 @@ MODEL_NAMES=(
     "Qwen 3.6-35B-A3B (MoE)"
     "Gemma 4 31B (dense)"
     "Muse Glimmer 30B (dense, vision)"
+    "Qwen 3.8-27B (dense, vision)"
 )
 MODEL_HF_REPOS=(
     "unsloth/Qwen3.6-27B-GGUF"
     "unsloth/Qwen3.6-35B-A3B-GGUF"
     "unsloth/gemma-4-31b-it-GGUF"
     "unsloth/Muse-Glimmer-30B-GGUF"
+    "unsloth/Qwen3.8-27B-GGUF"
 )
 MODEL_FILE_PATTERNS=(
     "Qwen3.6-27B"
     "Qwen3.6-35B-A3B"
     "gemma-4-31B-it"
     "Muse-Glimmer-30B"
+    "Qwen3.8-27B"
 )
 MODEL_MMPROJ_FILES=(
     "mmproj-BF16.gguf"
     "mmproj-BF16.gguf"
     "mmproj-BF16.gguf"
     "mmproj-Muse-Glimmer-30B-BF16.gguf"
+    "mmproj-BF16.gguf"
 )
-MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "gemma4-31b" "muse-glimmer-30b")
-MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q6_K" "UD-Q4_K_XL")
+MODEL_ALIASES=("qwen3.6-27b" "qwen3.6-35b-a3b" "gemma4-31b" "muse-glimmer-30b" "qwen3.8-27b")
+MODEL_DEFAULT_QUANTS=("Q6_K" "Q4_K_M" "Q6_K" "UD-Q4_K_XL" "Q6_K")
+# GGUF `general.architecture` value per model — needed for the YaRN
+# --override-kv trick below, which overrides <arch>.context_length in the
+# GGUF's own metadata namespace. Verified by reading each model's actual
+# GGUF header (see docs/qwen-3.6-vs-3.8-research.md) — do not guess these
+# from repo names, llama.cpp's arch tags don't always match them.
+MODEL_ARCH_TAGS=("qwen35" "qwen35moe" "gemma4" "muse-glimmer" "qwen35")
 
 # Muse Glimmer ships Unsloth Dynamic quants (UD-*_XL) instead of the
 # classic K-quants, so it gets its own quant list (applied after model
@@ -79,7 +89,7 @@ Docker llama.cpp Setup
 Usage: ./setup_docker.sh [options]
 
 Options:
-  --model <number>            Model (1=27B, 2=35B-A3B, 3=Gemma31B, 4=MuseGlimmer30B)
+  --model <number>            Model (1=27B, 2=35B-A3B, 3=Gemma31B, 4=MuseGlimmer30B, 5=Qwen3.8-27B)
   --quant <Q3_K_M|...|Q8_0>  Quantization
   --kv-cache <preset>         KV cache preset: q8_0, mixed, q4_0 (default: q8_0)
   --context-target <target>   Context target: 262k, 512k, 768k, 1m (default: 262k)
@@ -90,7 +100,8 @@ Options:
   --port <port>               API port (default: 8080)
   --context-length <N>        Exact context window in tokens (overrides --context-target)
   --parallel <N>              Concurrent slots (default: 3)
-  --mtp                       Enable Multi-Token Prediction (27B only, ~2x faster generation)
+  --mtp                       Enable Multi-Token Prediction (models 1, 5 only, ~2x faster generation)
+                              Forces --parallel 1 and disables vision (both required by MTP)
   --dflash                    Enable DFlash speculative decoding (27B only, ~3.75x faster generation)
                               Self-converts a draft model from the primary source on first run
                               (one-time, adds a few minutes). Mutually exclusive with --mtp.
@@ -212,14 +223,15 @@ if [ "$MODEL_IDX" = "3" ]; then
 fi
 
 if [ "$ENABLE_FIXED_TEMPLATE" = "true" ] && [ "$MODEL_IDX" -gt 1 ]; then
-    echo "ERROR: --fixed-chat-template only supports Qwen models (1, 2), not Gemma (3) or Muse Glimmer (4)."
+    echo "ERROR: --fixed-chat-template only supports Qwen 3.5/3.6 models (1, 2) — it's a fix for their"
+    echo "  specific template bugs, unverified against Qwen 3.8's (5) newer template. Not Gemma (3) or Muse Glimmer (4) either."
     exit 1
 fi
 
 # ===================================================================
-# MTP prompt (only for Qwen 3.6-27B)
+# MTP prompt (Qwen 3.6-27B and Qwen 3.8-27B only)
 # ===================================================================
-if [ "$MODEL_IDX" = "0" ] && [ "$ENABLE_MTP" = "false" ] && [ "$AUTO_YES" = "false" ]; then
+if { [ "$MODEL_IDX" = "0" ] || [ "$MODEL_IDX" = "4" ]; } && [ "$ENABLE_MTP" = "false" ] && [ "$AUTO_YES" = "false" ]; then
     echo ""
     echo "Enable Multi-Token Prediction (MTP)?"
     echo "  ~2x faster generation using built-in draft prediction heads"
@@ -235,17 +247,35 @@ if [ "$MODEL_IDX" = "0" ] && [ "$ENABLE_MTP" = "false" ] && [ "$AUTO_YES" = "fal
     done
 fi
 
-if [ "$ENABLE_MTP" = "true" ] && [ "$MODEL_IDX" != "0" ]; then
-    echo "ERROR: MTP is only supported for Qwen 3.6-27B (model 1)."
+if [ "$ENABLE_MTP" = "true" ] && [ "$MODEL_IDX" != "0" ] && [ "$MODEL_IDX" != "4" ]; then
+    echo "ERROR: MTP is only supported for Qwen 3.6-27B (model 1) or Qwen 3.8-27B (model 5)."
     exit 1
 fi
 
 if [ "$ENABLE_MTP" = "true" ]; then
-    HF_REPO="unsloth/Qwen3.6-27B-MTP-GGUF"
-    FILE_PATTERN="Qwen3.6-27B"
+    # MTP requires disabling vision and forcing a single parallel slot — see
+    # setup_llamacpp.sh for the full rationale (Unsloth docs: --mmproj and
+    # --parallel >1 are both unsupported alongside --spec-type draft-mtp).
     MMPROJ_FILE=""
-    QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0" "BF16")
-    MODEL_DEFAULT_QUANTS[0]="Q6_K"
+    if [ "$PARALLEL" != "1" ]; then
+        echo "  NOTE: --mtp forces --parallel 1 (MTP speculative decoding is not supported"
+        echo "        with multiple concurrent slots) — overriding --parallel $PARALLEL."
+        PARALLEL=1
+    fi
+
+    if [ "$MODEL_IDX" = "0" ]; then
+        HF_REPO="unsloth/Qwen3.6-27B-MTP-GGUF"
+        FILE_PATTERN="Qwen3.6-27B"
+        QUANT_OPTIONS=("Q3_K_M" "Q4_K_M" "Q5_K_M" "Q6_K" "Q8_0" "BF16")
+        MODEL_DEFAULT_QUANTS[0]="Q6_K"
+    elif [ "$MODEL_IDX" = "4" ]; then
+        # Qwen 3.8-27B ships the MTP head tensors in every quant of the
+        # default repo already — no repo swap, no separate quant list.
+        echo "  NOTE: MTP on Qwen 3.8-27B is confirmed working in this repo's own testing"
+        echo "        (~1.54x generation speedup vs. its own baseline; Qwen 3.6-27B measured"
+        echo "        ~1.64x on the same hardware) but has no wider public corroboration as"
+        echo "        of 2026-08-14 — treat as preliminary."
+    fi
 fi
 
 # ===================================================================
@@ -425,11 +455,19 @@ if [ "$USE_YARN" = "true" ]; then
     # Scale factor = target / native trained context (Qwen: 262144, Muse: 131072)
     ROPE_SCALE=$(python3 -c "print($MAX_CONTEXT / $NATIVE_CTX)")
     EXTRA_FLAGS="--rope-scaling yarn --rope-scale $ROPE_SCALE --yarn-orig-ctx $NATIVE_CTX"
-    # Muse Glimmer: llama.cpp clamps --ctx-size to the trained length read
-    # from GGUF metadata — override it (same trick verified to 1M context:
-    # https://www.reddit.com/r/LocalLLaMA — Muse's global layers are NoPE, so
-    # YaRN stretching degrades far less than on full-RoPE architectures)
-    EXTRA_FLAGS="$EXTRA_FLAGS --override-kv muse-glimmer.context_length=int:$MAX_CONTEXT"
+    # llama.cpp clamps --ctx-size to n_ctx_train read from the GGUF's own
+    # metadata regardless of the YaRN flags above — override it per the
+    # model's actual GGUF architecture (see MODEL_ARCH_TAGS above). Using
+    # the wrong key here is a silent no-op, not an error: llama.cpp just
+    # falls back to n_ctx_train with no warning that the override didn't
+    # take (confirmed via a real deploy — see docs/qwen-3.6-vs-3.8-research.md
+    # for how this was found: every non-Muse model here was silently capped
+    # at native context despite --context-target claiming otherwise, until
+    # this per-arch key was added). Muse Glimmer's YaRN scaling beyond that
+    # is separately verified to 1M context: https://www.reddit.com/r/LocalLLaMA
+    # — its global layers are NoPE, so it degrades far less than full-RoPE
+    # architectures; that verification does NOT extend to the other models.
+    EXTRA_FLAGS="$EXTRA_FLAGS --override-kv ${MODEL_ARCH_TAGS[$MODEL_IDX]}.context_length=int:$MAX_CONTEXT"
 fi
 if [ "$ENABLE_MTP" = "true" ]; then
     EXTRA_FLAGS="$EXTRA_FLAGS --spec-type draft-mtp --spec-draft-n-max 3"

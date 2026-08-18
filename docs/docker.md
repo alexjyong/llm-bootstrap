@@ -12,7 +12,9 @@ Pre-built llama-server Docker image — no CUDA compilation on the VM. Pull the 
 cd ~/docker && ./setup_docker.sh --model 1 --quant Q6_K --yes
 ```
 
-Available models: 1 = Qwen 3.6-27B, 2 = Qwen 3.6-35B-A3B, 3 = Gemma 4 31B, 4 = Muse Glimmer 30B. Muse Glimmer uses Unsloth Dynamic quants (`UD-Q2_K_XL` … `UD-Q8_K_XL`, plus `Q8_0`), defaults to `UD-Q4_K_XL` (~18 GB), downloads its vision adapter, and applies Meta's recommended sampling settings (temp 1.0, top-p 0.95, top-k 64) — see [docs/llamacpp.md](llamacpp.md#muse-glimmer-30b---model-5). Context targets for Muse are `131k` (native default) and `262k` (YaRN 2x, the documented ceiling). If the pre-built image predates llama.cpp's Muse Glimmer support, the script rebuilds the image locally from current master automatically.
+Available models: 1 = Qwen 3.6-27B, 2 = Qwen 3.6-35B-A3B, 3 = Gemma 4 31B, 4 = Muse Glimmer 30B, 5 = Qwen 3.8-27B. Muse Glimmer uses Unsloth Dynamic quants (`UD-Q2_K_XL` … `UD-Q8_K_XL`, plus `Q8_0`), defaults to `UD-Q4_K_XL` (~18 GB), downloads its vision adapter, and applies Meta's recommended sampling settings (temp 1.0, top-p 0.95, top-k 64) — see [docs/llamacpp.md](llamacpp.md#muse-glimmer-30b---model-5). Context targets for Muse are `131k` (native default) and `262k` (YaRN 2x, the documented ceiling). If the pre-built image predates llama.cpp's Muse Glimmer support, the script rebuilds the image locally from current master automatically.
+
+Qwen 3.8-27B (5) is the same dense 27B size class as model 1, with a vision encoder and native `reasoning_effort` support in its chat template — see [docs/llamacpp.md](llamacpp.md#qwen-38-27b---model-6) for the caveat about llama.cpp currently dropping that parameter until [PR #26941](https://github.com/ggml-org/llama.cpp/pull/26941) merges upstream.
 
 ## Why Docker?
 
